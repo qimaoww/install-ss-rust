@@ -54,8 +54,13 @@
 ## 使用方法
 
 ```bash
-chmod +x install_ss_rust.sh
-sudo ./install_ss_rust.sh
+curl -fsSL https://raw.githubusercontent.com/qimaoaa/install-ss-rust/refs/heads/main/install_ss_rust.sh | sudo bash
+```
+
+可选（先下载再执行）：
+
+```bash
+curl -fsSL -o install_ss_rust.sh https://raw.githubusercontent.com/qimaoaa/install-ss-rust/refs/heads/main/install_ss_rust.sh && chmod +x install_ss_rust.sh && sudo ./install_ss_rust.sh
 ```
 
 > 需 root 权限运行。
