@@ -13,6 +13,14 @@
 
 ---
 
+## 使用方法
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/qimaoaa/install-ss-rust/refs/heads/main/install_ss_rust.sh)
+```
+
+---
+
 ## 功能特性
 
 ### 1) 安装与修复
@@ -48,14 +56,6 @@
 - 先比较当前版本与最新版本
 - 仅在有新版本时执行更新
 - 若服务运行中，更新后自动重启服务
-
----
-
-## 使用方法
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/qimaoaa/install-ss-rust/refs/heads/main/install_ss_rust.sh)
-```
 
 ---
 
