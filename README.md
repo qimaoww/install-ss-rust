@@ -1,4 +1,4 @@
-# Shadowsocks-rust 一键管理脚本（中文）
+# Shadowsocks-rust AI写的一键管理脚本（中文）
 
 这是一个面向 Linux 的 `shadowsocks-rust` 管理脚本，支持：
 
@@ -56,40 +56,6 @@
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/qimaoaa/install-ss-rust/refs/heads/main/install_ss_rust.sh)
 ```
-
-> 需 root 权限运行。
-
----
-
-## 菜单说明
-
-- `1` 安装并初始化
-- `2` 查看配置
-- `3` 新增端口
-- `4` 修改端口
-- `5` 删除端口
-- `6` 查看日志
-- `7` 服务管理
-- `8` 更新程序
-- `9` 完全卸载
-- `10` 全局配置（IPv6优先）
-- `0` 退出
-
----
-
-## 常见问题
-
-### Q1：之前安装中断，导致“已安装但服务没起来/没端口”
-
-直接重新执行菜单 `1`，脚本会自动识别并进入修复流程。
-
-### Q2：为什么 DNS 不在全局里？
-
-脚本当前设计为“端口级 DNS”，每个端口可独立设置，更灵活。
-
-### Q3：修改端口时如何随机端口？
-
-在“新端口”输入 `random` 或 `r` 即可。
 
 ---
 
