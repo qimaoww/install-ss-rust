@@ -668,11 +668,11 @@ create_service() {
         # In some non-interactive shells PATH may not include /usr/sbin
         if [ -x /usr/sbin/adduser ]; then
             # Debian/Ubuntu preferred
-            /usr/sbin/adduser --system --no-create-home --disabled-login --shell /usr/sbin/nologin "$RUN_USER" >/dev/null
+            /usr/sbin/adduser --system --group --no-create-home --disabled-login --shell /usr/sbin/nologin "$RUN_USER" >/dev/null
         elif [ -x /usr/sbin/useradd ]; then
             /usr/sbin/useradd -r -s /usr/sbin/nologin -M "$RUN_USER"
         elif command -v adduser >/dev/null 2>&1; then
-            adduser --system --no-create-home --disabled-login --shell /usr/sbin/nologin "$RUN_USER" >/dev/null
+            adduser --system --group --no-create-home --disabled-login --shell /usr/sbin/nologin "$RUN_USER" >/dev/null
         elif command -v useradd >/dev/null 2>&1; then
             useradd -r -s /usr/sbin/nologin -M "$RUN_USER"
         else
