@@ -25,6 +25,14 @@ log_warn() { echo -e "${YELLOW}[警告]${NC} $1"; }
 log_err()  { echo -e "${RED}[错误]${NC} $1" >&2; }
 section()  { echo -e "\n${CYAN}--- $1 ---${NC}"; }
 
+trim_ws() {
+    # Trim leading/trailing whitespace (incl. tabs/newlines)
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
 is_service_installed() {
     local load_state=""
 
@@ -560,7 +568,7 @@ add_config() {
 
     section "$context 新增端口"
     while true; do
-        read -p "端口（${PORT_MIN}-${PORT_MAX}，回车随机）: " SS_PORT
+        read -r -p "端口（${PORT_MIN}-${PORT_MAX}，回车随机）: " SS_PORT
 
         if [[ -z "$SS_PORT" ]]; then
             SS_PORT=$(generate_random_available_port || true)
@@ -587,7 +595,7 @@ add_config() {
     printf " %2s) %s\n" "1" "2022-blake3-aes-128-gcm（默认）"
     printf " %2s) %s\n" "2" "2022-blake3-aes-256-gcm"
     printf " %2s) %s\n" "3" "2022-blake3-chacha20-poly1305"
-    read -p "选择 [1，默认 2022-blake3-aes-128-gcm]: " METHOD_CHOICE
+    read -r -p "选择 [1，默认 2022-blake3-aes-128-gcm]: " METHOD_CHOICE
 
     case $METHOD_CHOICE in
         2) SS_METHOD="2022-blake3-aes-256-gcm" ;;
@@ -595,7 +603,8 @@ add_config() {
         *) SS_METHOD="2022-blake3-aes-128-gcm" ;;
     esac
 
-    read -p "监听地址（默认 [::]）: " SS_SERVER
+    read -r -p "监听地址（默认 [::]）: " SS_SERVER
+    SS_SERVER=$(trim_ws "${SS_SERVER:-}" )
     SS_SERVER=${SS_SERVER:-"[::]"}
     SS_SERVER=$(normalize_listen_addr "$SS_SERVER")
     if [[ -z "$SS_SERVER" ]]; then
@@ -603,7 +612,8 @@ add_config() {
     fi
 
     while true; do
-        read -p "密钥（留空自动生成）: " SS_PASSWORD
+        read -r -p "密钥（留空自动生成）: " SS_PASSWORD
+        SS_PASSWORD=$(trim_ws "${SS_PASSWORD:-}")
 
         if [[ -z "${SS_PASSWORD}" ]]; then
             log_info "未输入密钥，正在为 $SS_METHOD 随机生成安全密钥..."
@@ -619,7 +629,7 @@ add_config() {
         fi
     done
 
-    read -p "端口DNS（留空不设置）: " SS_DNS
+    read -r -p "端口DNS（留空不设置）: " SS_DNS
 
     log_info "写入端口配置..."
     
@@ -651,11 +661,19 @@ add_config() {
 
 create_service() {
     log_info "正在创建 systemd 系统服务..."
-    
+
     # Create a dedicated system user for better security and to avoid systemd warnings
     RUN_USER="ss-rust"
     if ! id "$RUN_USER" &>/dev/null; then
-        useradd -r -s /usr/sbin/nologin -M "$RUN_USER"
+        if command -v adduser >/dev/null 2>&1; then
+            # Debian/Ubuntu preferred
+            adduser --system --no-create-home --disabled-login --shell /usr/sbin/nologin "$RUN_USER" >/dev/null
+        elif command -v useradd >/dev/null 2>&1; then
+            useradd -r -s /usr/sbin/nologin -M "$RUN_USER"
+        else
+            log_err "未找到 adduser/useradd，无法创建系统用户。请安装 passwd/adduser 相关包后重试。"
+            return 1
+        fi
     fi
 
     cat > "${SERVICE_FILE}" <<EOF
