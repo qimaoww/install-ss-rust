@@ -665,13 +665,18 @@ create_service() {
     # Create a dedicated system user for better security and to avoid systemd warnings
     RUN_USER="ss-rust"
     if ! id "$RUN_USER" &>/dev/null; then
-        if command -v adduser >/dev/null 2>&1; then
+        # In some non-interactive shells PATH may not include /usr/sbin
+        if [ -x /usr/sbin/adduser ]; then
             # Debian/Ubuntu preferred
+            /usr/sbin/adduser --system --no-create-home --disabled-login --shell /usr/sbin/nologin "$RUN_USER" >/dev/null
+        elif [ -x /usr/sbin/useradd ]; then
+            /usr/sbin/useradd -r -s /usr/sbin/nologin -M "$RUN_USER"
+        elif command -v adduser >/dev/null 2>&1; then
             adduser --system --no-create-home --disabled-login --shell /usr/sbin/nologin "$RUN_USER" >/dev/null
         elif command -v useradd >/dev/null 2>&1; then
             useradd -r -s /usr/sbin/nologin -M "$RUN_USER"
         else
-            log_err "未找到 adduser/useradd，无法创建系统用户。请安装 passwd/adduser 相关包后重试。"
+            log_err "未找到 adduser/useradd，无法创建系统用户。请确认已安装 adduser/passwd，且 PATH 包含 /usr/sbin。"
             return 1
         fi
     fi
