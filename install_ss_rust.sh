@@ -22,7 +22,7 @@ NC='\033[0m'
 
 log_info() { echo -e "${GREEN}[信息]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[警告]${NC} $1"; }
-log_err()  { echo -e "${RED}[错误]${NC} $1"; >&2; }
+log_err()  { echo -e "${RED}[错误]${NC} $1" >&2; }
 section()  { echo -e "\n${CYAN}--- $1 ---${NC}"; }
 
 is_service_installed() {
@@ -111,6 +111,20 @@ get_pkg_name() {
                 echo "xz"
             fi
             ;;
+        base64)
+            if [ "$pm" = "apt" ]; then
+                echo "coreutils"
+            else
+                echo "coreutils"
+            fi
+            ;;
+        ip)
+            if [ "$pm" = "apt" ]; then
+                echo "iproute2"
+            else
+                echo "iproute"
+            fi
+            ;;
         *) echo "$cmd" ;;
     esac
 }
@@ -120,7 +134,7 @@ ensure_dependencies() {
     local cmd=""
     local pkg=""
 
-    for cmd in curl jq tar xz awk; do
+    for cmd in curl jq tar xz awk base64 ip; do
         if ! command -v "$cmd" &> /dev/null; then
             missing_cmds+=("$cmd")
         fi
@@ -154,9 +168,9 @@ ensure_dependencies() {
 fetch_public_ip() {
     local ip=""
 
-    ip=$(curl -4 -fsS --max-time 5 https://api64.ipify.org 2>/dev/null || true)
+    ip=$(curl -4 -fsS --max-time 5 -A "install-ss-rust/1.0" https://api64.ipify.org 2>/dev/null || true)
     if [[ -z "$ip" ]]; then
-        ip=$(curl -4 -fsS --max-time 5 https://ifconfig.me 2>/dev/null || true)
+        ip=$(curl -4 -fsS --max-time 5 -A "install-ss-rust/1.0" https://ifconfig.me 2>/dev/null || true)
     fi
 
     if [[ -z "$ip" ]]; then
@@ -367,9 +381,17 @@ install_ss() {
     esac
 
     log_info "获取最新版本信息..."
-    LATEST_TAG=$(curl -sS https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | jq -r .tag_name)
+    LATEST_TAG=$(curl -fsSL -A "install-ss-rust/1.0" https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | jq -r .tag_name)
     if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then
-        log_err "获取最新发布版本失败。"
+        log_warn "GitHub API 获取 latest 失败（可能被限流）。尝试从 releases 页面解析..."
+        LATEST_TAG=$(curl -fsSL -A "install-ss-rust/1.0" https://github.com/shadowsocks/shadowsocks-rust/releases/latest \
+            | grep -Eo '/shadowsocks/shadowsocks-rust/releases/tag/v[0-9]+(\.[0-9]+)+' \
+            | head -n1 \
+            | awk -F/ '{print $NF}' \
+            || true)
+    fi
+    if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then
+        log_err "获取最新发布版本失败（API 与页面解析均失败）。"
         exit 1
     fi
 
@@ -462,9 +484,17 @@ update_ss() {
     log_info "当前版本: ${current_ver}"
 
     log_info "获取最新版本信息..."
-    LATEST_TAG=$(curl -sS https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | jq -r .tag_name)
+    LATEST_TAG=$(curl -fsSL -A "install-ss-rust/1.0" https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | jq -r .tag_name)
     if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then
-        log_err "获取最新发布版本失败。"
+        log_warn "GitHub API 获取 latest 失败（可能被限流）。尝试从 releases 页面解析..."
+        LATEST_TAG=$(curl -fsSL -A "install-ss-rust/1.0" https://github.com/shadowsocks/shadowsocks-rust/releases/latest \
+            | grep -Eo '/shadowsocks/shadowsocks-rust/releases/tag/v[0-9]+(\.[0-9]+)+' \
+            | head -n1 \
+            | awk -F/ '{print $NF}' \
+            || true)
+    fi
+    if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then
+        log_err "获取最新发布版本失败（API 与页面解析均失败）。"
         return
     fi
 
