@@ -1533,13 +1533,14 @@ show_menu() {
     echo -e "  ${BOLD}4${NC})  修改端口"
     echo -e "  ${BOLD}5${NC})  删除端口"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
-    echo -e "  ${BOLD}6${NC})  查看实时日志"
-    echo -e "  ${BOLD}7${NC})  服务管理"
-    echo -e "  ${BOLD}8${NC})  更新程序"
-    echo -e "  ${BOLD}9${NC})  完全卸载"
+    echo -e "  ${BOLD}6${NC})  服务管理"
+    echo -e "  ${BOLD}7${NC})  更新程序"
+    echo -e "  ${BOLD}8${NC})  完全卸载"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
-    echo -e "  ${BOLD}10${NC}) 全局配置（IPv6优先）"
-    echo -e "  ${BOLD}11${NC}) 屏蔽中国出站（IP/域名）"
+    echo -e "  ${BOLD}9${NC})  全局配置（IPv6优先）"
+    echo -e "  ${BOLD}10${NC}) 屏蔽中国出站（IP/域名）"
+    echo -e "${DIM}  ──────────────────────────────────${NC}"
+    echo -e "  ${BOLD}11${NC}) 查看实时日志"
     echo -e "  ${BOLD}12${NC}) 切换日志等级（debug/info/warn等）"
     echo -e "  ${BOLD}0${NC})  退出"
     echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -1552,11 +1553,10 @@ show_menu() {
         3) add_config; press_any_key ;;
         4) edit_config; press_any_key ;;
         5) remove_config; press_any_key ;;
-        6) view_logs; press_any_key ;;
-        7) manage_service; press_any_key ;;
-        8) update_ss; press_any_key ;;
-        9) uninstall_ss; press_any_key ;;
-        10)
+        6) manage_service; press_any_key ;;
+        7) update_ss; press_any_key ;;
+        8) uninstall_ss; press_any_key ;;
+        9)
             if configure_network_options; then
                 if is_service_installed; then
                     systemctl restart shadowsocks-rust
@@ -1567,7 +1567,8 @@ show_menu() {
             fi
             press_any_key
             ;;
-        11) configure_block_cn; press_any_key ;;
+        10) configure_block_cn; press_any_key ;;
+        11) view_logs; press_any_key ;;
         12) configure_log_level; press_any_key ;;
         0) exit 0 ;;
         *) log_warn "无效的选项，请重新输入。"; press_any_key ;;
