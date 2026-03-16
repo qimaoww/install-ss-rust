@@ -10,20 +10,38 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/etc/shadowsocks-rust"
 CONF_FILE="${CONF_DIR}/config.json"
 SERVICE_FILE="/etc/systemd/system/shadowsocks-rust.service"
+ACL_FILE="${CONF_DIR}/block_cn.acl"
+CN_IP_CACHE="${CONF_DIR}/.cn_ip.cache"
+CN_DOMAIN_CACHE="${CONF_DIR}/.cn_domain.cache"
+CN_IP_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geoip/cn.list"
+CN_DOMAIN_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geosite/geolocation-cn.list"
 PORT_MIN=10000
 PORT_MAX=65535
 
 # --- Colors & Logging ---
+BOLD='\033[1m'
+DIM='\033[2m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 RED='\033[0;31m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-log_info() { echo -e "${GREEN}[信息]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[警告]${NC} $1"; }
-log_err()  { echo -e "${RED}[错误]${NC} $1" >&2; }
-section()  { echo -e "\n${CYAN}--- $1 ---${NC}"; }
+log_info() { echo -e "  ${GREEN}✔${NC} $1"; }
+log_warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
+log_err()  { echo -e "  ${RED}✘${NC} $1" >&2; }
+section()  {
+    echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${BOLD}$1${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+press_any_key() {
+    echo ""
+    echo -ne "  ${DIM}按回车键返回主菜单...${NC}"
+    read -r
+}
 
 trim_ws() {
     # Trim leading/trailing whitespace (incl. tabs/newlines)
@@ -243,6 +261,223 @@ select_outbound_bind_addr() {
     done
 }
 
+download_cn_ip() {
+    local tmp_file=""
+    tmp_file=$(mktemp /tmp/cn_ip.XXXXXX)
+
+    log_info "正在下载中国 IP 列表..."
+    if ! curl -fsSL --retry 3 --connect-timeout 15 -o "$tmp_file" "${CN_IP_URL}"; then
+        rm -f "$tmp_file"
+        log_err "下载中国 IP 列表失败，请检查网络连接。"
+        return 1
+    fi
+    if [ ! -s "$tmp_file" ]; then
+        rm -f "$tmp_file"
+        log_err "下载的中国 IP 列表为空。"
+        return 1
+    fi
+    mkdir -p "${CONF_DIR}"
+    mv "$tmp_file" "${CN_IP_CACHE}"
+    chmod 644 "${CN_IP_CACHE}"
+    log_info "中国 IP 列表已保存，共 $(wc -l < "${CN_IP_CACHE}") 条。"
+    return 0
+}
+
+download_cn_domain() {
+    local tmp_file=""
+    local tmp_acl=""
+    tmp_file=$(mktemp /tmp/cn_domain.XXXXXX)
+    tmp_acl=$(mktemp /tmp/cn_domain_acl.XXXXXX)
+
+    log_info "正在下载中国域名列表..."
+    if ! curl -fsSL --retry 3 --connect-timeout 15 -o "$tmp_file" "${CN_DOMAIN_URL}"; then
+        rm -f "$tmp_file" "$tmp_acl"
+        log_err "下载中国域名列表失败，请检查网络连接。"
+        return 1
+    fi
+    if [ ! -s "$tmp_file" ]; then
+        rm -f "$tmp_file" "$tmp_acl"
+        log_err "下载的中国域名列表为空。"
+        return 1
+    fi
+    # 转换域名格式: +.domain -> ||domain , 纯域名 -> |domain
+    awk '{
+        if (/^\+\./) {
+            sub(/^\+\./, "")
+            print "||" $0
+        } else if (/^[a-zA-Z0-9]/) {
+            print "|" $0
+        }
+    }' "$tmp_file" > "$tmp_acl"
+    rm -f "$tmp_file"
+    mkdir -p "${CONF_DIR}"
+    mv "$tmp_acl" "${CN_DOMAIN_CACHE}"
+    chmod 644 "${CN_DOMAIN_CACHE}"
+    log_info "中国域名列表已保存，共 $(wc -l < "${CN_DOMAIN_CACHE}") 条。"
+    return 0
+}
+
+rebuild_cn_acl() {
+    local has_ip=0
+    local has_domain=0
+
+    [ -f "${CN_IP_CACHE}" ] && has_ip=1
+    [ -f "${CN_DOMAIN_CACHE}" ] && has_domain=1
+
+    if [ "$has_ip" -eq 0 ] && [ "$has_domain" -eq 0 ]; then
+        rm -f "${ACL_FILE}"
+        return 0
+    fi
+
+    mkdir -p "${CONF_DIR}"
+    cat > "${ACL_FILE}" <<'ACLHEADER'
+# Shadowsocks-rust ACL: 禁止出站到中国 IP/域名 和私有地址段
+# 由 install_ss_rust.sh 自动生成
+# 数据来源: https://github.com/MetaCubeX/meta-rules-dat
+
+[outbound_block_list]
+# --- 私有/保留地址段 ---
+0.0.0.0/8
+10.0.0.0/8
+100.64.0.0/10
+127.0.0.0/8
+169.254.0.0/16
+172.16.0.0/12
+192.0.0.0/24
+192.0.2.0/24
+192.88.99.0/24
+192.168.0.0/16
+198.18.0.0/15
+198.51.100.0/24
+203.0.113.0/24
+224.0.0.0/4
+240.0.0.0/4
+255.255.255.255/32
+::1/128
+::ffff:127.0.0.1/104
+fc00::/7
+fe80::/10
+ACLHEADER
+
+    if [ "$has_ip" -eq 1 ]; then
+        echo "" >> "${ACL_FILE}"
+        echo "# --- 中国大陆 IP 段 ---" >> "${ACL_FILE}"
+        cat "${CN_IP_CACHE}" >> "${ACL_FILE}"
+    fi
+
+    if [ "$has_domain" -eq 1 ]; then
+        echo "" >> "${ACL_FILE}"
+        echo "# --- 中国大陆域名 ---" >> "${ACL_FILE}"
+        cat "${CN_DOMAIN_CACHE}" >> "${ACL_FILE}"
+    fi
+
+    chmod 644 "${ACL_FILE}"
+    log_info "ACL 文件已生成，共 $(wc -l < "${ACL_FILE}") 行。"
+    return 0
+}
+
+configure_block_cn() {
+    local choice=""
+    local ip_status=""
+    local domain_status=""
+    local ip_tag=""
+    local domain_tag=""
+
+    while true; do
+        if [ -f "${CN_IP_CACHE}" ]; then
+            ip_status="${GREEN}● 已启用${NC}"
+            ip_tag="禁用"
+        else
+            ip_status="${DIM}○ 未启用${NC}"
+            ip_tag="启用"
+        fi
+        if [ -f "${CN_DOMAIN_CACHE}" ]; then
+            domain_status="${GREEN}● 已启用${NC}"
+            domain_tag="禁用"
+        else
+            domain_status="${DIM}○ 未启用${NC}"
+            domain_tag="启用"
+        fi
+
+        echo -e "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${BOLD}屏蔽中国出站${NC} ${DIM}(GeoIP / GeoSite)${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  屏蔽 CN IP   :  ${ip_status}"
+        echo -e "  屏蔽 CN 域名 :  ${domain_status}"
+        echo -e "${DIM}  ──────────────────────────────────${NC}"
+        echo -e "  ${BOLD}1${NC})  ${ip_tag}屏蔽 CN IP"
+        echo -e "  ${BOLD}2${NC})  ${domain_tag}屏蔽 CN 域名"
+        echo -e "  ${BOLD}3${NC})  更新列表（重新下载已启用项）"
+        echo -e "  ${BOLD}0${NC})  返回主菜单"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        read -p "  请选择: " choice
+
+        case "$choice" in
+            1)
+                if [ -f "${CN_IP_CACHE}" ]; then
+                    rm -f "${CN_IP_CACHE}"
+                    rebuild_cn_acl
+                    rebuild_service_file
+                    log_info "已禁用屏蔽 CN IP。"
+                else
+                    if download_cn_ip; then
+                        rebuild_cn_acl
+                        rebuild_service_file
+                        log_info "已启用屏蔽 CN IP。"
+                    fi
+                fi
+                ;;
+            2)
+                if [ -f "${CN_DOMAIN_CACHE}" ]; then
+                    rm -f "${CN_DOMAIN_CACHE}"
+                    rebuild_cn_acl
+                    rebuild_service_file
+                    log_info "已禁用屏蔽 CN 域名。"
+                else
+                    if download_cn_domain; then
+                        rebuild_cn_acl
+                        rebuild_service_file
+                        log_info "已启用屏蔽 CN 域名。"
+                    fi
+                fi
+                ;;
+            3)
+                local updated=0
+                if [ -f "${CN_IP_CACHE}" ]; then
+                    download_cn_ip && updated=1
+                fi
+                if [ -f "${CN_DOMAIN_CACHE}" ]; then
+                    download_cn_domain && updated=1
+                fi
+                if [ "$updated" -eq 1 ]; then
+                    rebuild_cn_acl
+                    rebuild_service_file
+                    log_info "列表已更新。"
+                else
+                    log_warn "当前没有启用任何屏蔽项，无需更新。"
+                fi
+                ;;
+            0|"")
+                return
+                ;;
+            *)
+                log_warn "无效选项。"
+                ;;
+        esac
+    done
+}
+
+rebuild_service_file() {
+    if is_service_installed; then
+        create_service
+        systemctl daemon-reload
+        if is_service_running; then
+            systemctl restart shadowsocks-rust
+            log_info "服务已重启应用新配置。"
+        fi
+    fi
+}
+
 configure_network_options() {
     local ipv6_choice=""
 
@@ -447,6 +682,20 @@ EOF
 
     configure_network_options
 
+    section "是否屏蔽中国出站？"
+    echo -e "  ${DIM}回车默认不启用，可稍后在菜单 11 中开启${NC}"
+    local block_ip_init=""
+    local block_domain_init=""
+    read -p "  启用屏蔽 CN IP？[y/N]: " block_ip_init
+    if [[ "${block_ip_init,,}" == "y" ]]; then
+        download_cn_ip || log_warn "下载 CN IP 列表失败，可稍后在菜单中重试。"
+    fi
+    read -p "  启用屏蔽 CN 域名？[y/N]: " block_domain_init
+    if [[ "${block_domain_init,,}" == "y" ]]; then
+        download_cn_domain || log_warn "下载 CN 域名列表失败，可稍后在菜单中重试。"
+    fi
+    rebuild_cn_acl
+
     add_config "首次安装"
     create_service
     
@@ -568,7 +817,7 @@ add_config() {
 
     section "$context 新增端口"
     while true; do
-        read -r -p "端口（${PORT_MIN}-${PORT_MAX}，回车随机）: " SS_PORT
+        echo -ne "  ${GREEN}➤${NC} 端口（${PORT_MIN}-${PORT_MAX}，回车随机）: "; read -r SS_PORT
 
         if [[ -z "$SS_PORT" ]]; then
             SS_PORT=$(generate_random_available_port || true)
@@ -591,11 +840,12 @@ add_config() {
         fi
     done
 
-    echo "加密方式："
-    printf " %2s) %s\n" "1" "2022-blake3-aes-128-gcm（默认）"
-    printf " %2s) %s\n" "2" "2022-blake3-aes-256-gcm"
-    printf " %2s) %s\n" "3" "2022-blake3-chacha20-poly1305"
-    read -r -p "选择 [1，默认 2022-blake3-aes-128-gcm]: " METHOD_CHOICE
+    echo -e "\n  ${DIM}── 加密方式设置 ──${NC}"
+    echo -e "  ${BOLD}1${NC}) 2022-blake3-aes-128-gcm ${DIM}(默认)${NC}"
+    echo -e "  ${BOLD}2${NC}) 2022-blake3-aes-256-gcm"
+    echo -e "  ${BOLD}3${NC}) 2022-blake3-chacha20-poly1305"
+    echo -e "  ${DIM}──────────────────────────────────${NC}"
+    echo -ne "  ${GREEN}➤${NC} 选择 [1]: "; read -r METHOD_CHOICE
 
     case $METHOD_CHOICE in
         2) SS_METHOD="2022-blake3-aes-256-gcm" ;;
@@ -603,7 +853,7 @@ add_config() {
         *) SS_METHOD="2022-blake3-aes-128-gcm" ;;
     esac
 
-    read -r -p "监听地址（默认 [::]）: " SS_SERVER
+    echo -ne "  ${GREEN}➤${NC} 监听地址（默认 [::]）: "; read -r SS_SERVER
     SS_SERVER=$(trim_ws "${SS_SERVER:-}" )
     SS_SERVER=${SS_SERVER:-"[::]"}
     SS_SERVER=$(normalize_listen_addr "$SS_SERVER")
@@ -612,7 +862,7 @@ add_config() {
     fi
 
     while true; do
-        read -r -p "密钥（留空自动生成）: " SS_PASSWORD
+        echo -ne "  ${GREEN}➤${NC} 密钥（留空自动生成）: "; read -r SS_PASSWORD
         SS_PASSWORD=$(trim_ws "${SS_PASSWORD:-}")
 
         if [[ -z "${SS_PASSWORD}" ]]; then
@@ -629,7 +879,7 @@ add_config() {
         fi
     done
 
-    read -r -p "端口DNS（留空不设置）: " SS_DNS
+    echo -ne "  ${GREEN}➤${NC} 端口DNS（留空不设置）: "; read -r SS_DNS
 
     log_info "写入端口配置..."
     
@@ -661,6 +911,7 @@ add_config() {
 
 create_service() {
     log_info "正在创建 systemd 系统服务..."
+    mkdir -p "${CONF_DIR}"
 
     # Create a dedicated system user for better security and to avoid systemd warnings
     RUN_USER="ss-rust"
@@ -705,7 +956,7 @@ PrivateTmp=true
 PrivateDevices=true
 ReadWritePaths=${CONF_DIR}
 
-ExecStart=${INSTALL_DIR}/ssserver -c ${CONF_FILE}
+ExecStart=${INSTALL_DIR}/ssserver -c ${CONF_FILE}$([ -f "${ACL_FILE}" ] && echo " --acl ${ACL_FILE}")
 Restart=on-failure
 RestartSec=3s
 
@@ -727,12 +978,28 @@ view_config() {
     local service_status=""
     service_status=$(is_service_running && echo -e "${GREEN}运行中${NC}" || echo -e "${RED}未运行${NC}")
 
-    echo -e "\n${CYAN}============== 当前配置 ==============${NC}"
-    echo -e "[全局]"
-    echo -e "  服务状态 : ${service_status}"
-    echo -e "  服务器IP : ${IP}"
-    echo -e "  IPv6优先 : ${IPV6_FIRST}"
-    echo -e "----------------------------------------"
+    local block_cn_ip_status=""
+    local block_cn_domain_status=""
+    if [ -f "${CN_IP_CACHE}" ]; then
+        block_cn_ip_status="${GREEN}已启用${NC}"
+    else
+        block_cn_ip_status="${YELLOW}未启用${NC}"
+    fi
+    if [ -f "${CN_DOMAIN_CACHE}" ]; then
+        block_cn_domain_status="${GREEN}已启用${NC}"
+    else
+        block_cn_domain_status="${YELLOW}未启用${NC}"
+    fi
+
+    echo -e "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${BOLD}当前配置信息${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${DIM}── 全局设置 ──${NC}"
+    echo -e "  服务状态    ${service_status}"
+    echo -e "  服务器IP    ${BOLD}${IP}${NC}"
+    echo -e "  IPv6优先    ${IPV6_FIRST}"
+    echo -e "  屏蔽CN IP   ${block_cn_ip_status}"
+    echo -e "  屏蔽CN 域名  ${block_cn_domain_status}"
 
     # 读取所有服务器配置
     SERVER_COUNT=$(jq '.servers | length' "${CONF_FILE}")
@@ -751,17 +1018,17 @@ view_config() {
             ENCODED_USERINFO=$(echo -n "${SS_METHOD}:${SS_PASSWORD}" | base64 -w0 | tr -d '=')
             SS_LINK="ss://${ENCODED_USERINFO}@${IP}:${SS_PORT}#ss-rust-${SS_PORT}"
             
-            echo -e "[端口 $((i + 1))] ${SS_PORT}"
-            echo -e "  监听地址 : ${SS_SERVER}"
-            echo -e "  出站绑定 : ${SS_OUTBOUND_BIND_ADDR:-未设置}"
-            echo -e "  DNS      : ${SS_DNS}"
-            echo -e "  加密方式 : ${SS_METHOD}"
-            echo -e "  连接密钥 : ${SS_PASSWORD}"
-            echo -e "  一键链接 : ${GREEN}${SS_LINK}${NC}"
-            echo -e "----------------------------------------"
+            echo -e "  ${DIM}── 端口 $((i + 1)) ──${NC}"
+            echo -e "  端口号      ${MAGENTA}${BOLD}${SS_PORT}${NC}"
+            echo -e "  监听地址    ${SS_SERVER}"
+            echo -e "  出站绑定    ${SS_OUTBOUND_BIND_ADDR:-未设置}"
+            echo -e "  DNS         ${SS_DNS}"
+            echo -e "  加密方式    ${SS_METHOD}"
+            echo -e "  连接密钥    ${SS_PASSWORD}"
+            echo -e "  一键链接    ${GREEN}${SS_LINK}${NC}"
         done
     fi
-    echo -e "${CYAN}========================================${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
 remove_config() {
@@ -784,18 +1051,20 @@ remove_config() {
     section "删除端口"
     mapfile -t server_entries < <(jq -r '.servers | to_entries[] | "\(.key)|\(.value.server_port)|\(.value.server)|\(.value.method)"' "${CONF_FILE}")
 
-    echo "可删除端口："
+    echo -e "  ${DIM}──────────────────────────────────${NC}"
+    echo -e "  ${BOLD}可删除端口：${NC}"
     for i in "${!server_entries[@]}"; do
         del_entry="${server_entries[$i]}"
-        printf " %2s) 端口:%-5s 监听:%-15s 方法:%s\n" \
+        printf "  ${BOLD}%2s${NC}) 端口: %-5s 监听: %-15s 方法: %s\n" \
             "$((i + 1))" \
             "$(echo "$del_entry" | awk -F'|' '{print $2}')" \
             "$(echo "$del_entry" | awk -F'|' '{print $3}')" \
             "$(echo "$del_entry" | awk -F'|' '{print $4}')"
     done
+    echo -e "  ${DIM}──────────────────────────────────${NC}"
 
     while true; do
-        read -p "选择序号（0返回）: " selected_no
+        echo -ne "  ${GREEN}➤${NC} 选择序号（0返回）: "; read -r selected_no
         if [[ "$selected_no" == "0" ]]; then
             return
         fi
@@ -852,18 +1121,20 @@ edit_config() {
     section "修改端口"
     mapfile -t server_entries < <(jq -r '.servers | to_entries[] | "\(.key)|\(.value.server_port)|\(.value.server)|\(.value.method)"' "${CONF_FILE}")
 
-    echo "可修改端口："
+    echo -e "  ${DIM}──────────────────────────────────${NC}"
+    echo -e "  ${BOLD}可修改端口：${NC}"
     for i in "${!server_entries[@]}"; do
         entry="${server_entries[$i]}"
-        printf " %2s) 端口:%-5s 监听:%-15s 方法:%s\n" \
+        printf "  ${BOLD}%2s${NC}) 端口: %-5s 监听: %-15s 方法: %s\n" \
             "$((i + 1))" \
             "$(echo "$entry" | awk -F'|' '{print $2}')" \
             "$(echo "$entry" | awk -F'|' '{print $3}')" \
             "$(echo "$entry" | awk -F'|' '{print $4}')"
     done
+    echo -e "  ${DIM}──────────────────────────────────${NC}"
 
     while true; do
-        read -p "选择序号: " selected_no
+        echo -ne "  ${GREEN}➤${NC} 选择序号: "; read -r selected_no
         if [[ "$selected_no" =~ ^[0-9]+$ ]] && [ "$selected_no" -ge 1 ] && [ "$selected_no" -le "${#server_entries[@]}" ]; then
             break
         fi
@@ -881,13 +1152,15 @@ edit_config() {
     current_dns=$(jq -r ".servers[$edit_index].dns // \"\"" "${CONF_FILE}")
     current_outbound_bind_addr=$(jq -r ".servers[$edit_index].outbound_bind_addr // \"\"" "${CONF_FILE}")
 
-    echo "当前配置："
-    echo "  端口     : ${current_port}"
-    echo "  监听地址 : ${current_server}"
-    echo "  加密方式 : ${current_method}"
-    echo "  端口DNS  : ${current_dns:-未设置}"
-    echo "  出站绑定 : ${current_outbound_bind_addr:-未设置}"
-    read -p "新端口（${PORT_MIN}-${PORT_MAX}，回车保持，random/r随机）: " new_port
+    echo -e "\n  ${DIM}── 当前配置 ──${NC}"
+    printf "  %-12s : ${MAGENTA}%s${NC}\n" "端口" "${current_port}"
+    printf "  %-12s : %s\n" "监听地址" "${current_server}"
+    printf "  %-12s : %s\n" "加密方式" "${current_method}"
+    printf "  %-12s : %s\n" "端口DNS" "${current_dns:-未设置}"
+    printf "  %-12s : %s\n" "出站绑定" "${current_outbound_bind_addr:-未设置}"
+    echo -e "  ${DIM}──────────────────────────────────${NC}"
+    
+    echo -ne "  ${GREEN}➤${NC} 新端口（${PORT_MIN}-${PORT_MAX}，回车保持，random/r随机）: "; read -r new_port
     if [[ -z "$new_port" ]]; then
         new_port="$current_port"
     elif [[ "${new_port,,}" == "random" || "${new_port,,}" == "r" ]]; then
@@ -909,7 +1182,7 @@ edit_config() {
         fi
     fi
 
-    read -p "新监听地址（回车保持，输入 [::] 用默认）: " new_server
+    echo -ne "  ${GREEN}➤${NC} 新监听地址（回车保持，输入 [::] 用默认）: "; read -r new_server
     if [[ -z "$new_server" ]]; then
         new_server="$current_server"
     else
@@ -919,12 +1192,12 @@ edit_config() {
         fi
     fi
 
-    echo "新加密方式（回车保持）:"
-    printf " %2s) %s\n" "1" "2022-blake3-aes-128-gcm"
-    printf " %2s) %s\n" "2" "2022-blake3-aes-256-gcm"
-    printf " %2s) %s\n" "3" "2022-blake3-chacha20-poly1305"
-    echo "当前: ${current_method}"
-    read -p "选择 [默认保持]: " method_choice
+    echo -e "\n  ${DIM}── 加密方式设置 ──${NC}"
+    echo -e "  ${BOLD}1${NC}) 2022-blake3-aes-128-gcm"
+    echo -e "  ${BOLD}2${NC}) 2022-blake3-aes-256-gcm"
+    echo -e "  ${BOLD}3${NC}) 2022-blake3-chacha20-poly1305"
+    echo -e "  ${DIM}──────────────────────────────────${NC}"
+    echo -ne "  ${GREEN}➤${NC} 选择（当前: ${current_method}，回车保持）: "; read -r method_choice
 
     case "$method_choice" in
         "") new_method="$current_method" ;;
@@ -942,7 +1215,7 @@ edit_config() {
         log_info "已修改加密方式，密钥留空将自动生成。"
     fi
 
-    read -p "新密钥（回车自动处理，random 随机）: " password_input
+    echo -ne "  ${GREEN}➤${NC} 新密钥（回车自动处理，random 随机）: "; read -r password_input
     if [[ -n "$password_input" ]]; then
         if [[ "${password_input,,}" == "random" ]]; then
             new_password=$("${INSTALL_DIR}/ssservice" genkey -m "$new_method")
@@ -961,18 +1234,19 @@ edit_config() {
         log_info "检测到加密方式已变更，已自动生成匹配的新密钥。"
     fi
 
-    read -p "端口DNS（回车保持，输入 none 清空）: " new_dns
+    echo -ne "  ${GREEN}➤${NC} 端口DNS（回车保持，none 清空）: "; read -r new_dns
     if [[ -z "$new_dns" ]]; then
         new_dns="$current_dns"
     elif [[ "${new_dns,,}" == "none" ]]; then
         new_dns=""
     fi
 
-    echo "出站绑定IP设置（当前: ${current_outbound_bind_addr:-未设置}）:"
-    printf " %2s) %s\n" "1" "保持当前"
-    printf " %2s) %s\n" "2" "从系统网卡地址选择"
-    printf " %2s) %s\n" "3" "清空（不使用）"
-    read -p "选择 [1]: " bind_choice
+    echo -e "\n  ${DIM}── 出站绑定IP设置 ──${NC}"
+    echo -e "  ${BOLD}1${NC}) 保持当前 ${DIM}(${current_outbound_bind_addr:-未设置})${NC}"
+    echo -e "  ${BOLD}2${NC}) 从系统网卡地址选择"
+    echo -e "  ${BOLD}3${NC}) 清空（不使用）"
+    echo -e "  ${DIM}──────────────────────────────────${NC}"
+    echo -ne "  ${GREEN}➤${NC} 选择 [1]: "; read -r bind_choice
 
     case "$bind_choice" in
         2)
@@ -1036,8 +1310,10 @@ view_logs() {
         log_err "服务未安装。"
         return
     fi
-    section "实时日志（Ctrl+C 退出）"
-    journalctl -u shadowsocks-rust -f
+    section "服务日志 (按 'q' 键退出返回主菜单)"
+    
+    # 使用 less 查看日志，自定义底部提示（使用英文防止转码乱码）
+    journalctl -u shadowsocks-rust -n 100 --no-pager | less -R +G -P " (Press 'q' to quit, Up/Down to scroll) "
 }
 
 manage_service() {
@@ -1190,46 +1466,41 @@ show_menu() {
         *) version_c="${GREEN}${version}${NC}" ;;
     esac
 
-    echo -e "\n${GREEN}====================================${NC}"
-    echo -e "${GREEN}   Shadowsocks-rust 管理菜单       ${NC}"
-    echo -e "${GREEN}====================================${NC}"
-    echo -e " 状态: 安装=${installed_c} | 服务=${service_c} | 自启=${boot_c} | 版本=${version_c}"
-    echo "------------------------------------"
-    echo " [安装初始化]"
-    printf " %2s) %s\n" "1" "安装并初始化"
-    echo ""
-    echo " [端口配置]"
-    printf " %2s) %s\n" "2" "查看配置"
-    printf " %2s) %s\n" "3" "新增端口"
-    printf " %2s) %s\n" "4" "修改端口"
-    printf " %2s) %s\n" "5" "删除端口"
-    echo ""
-    echo " [系统管理]"
-    printf " %2s) %s\n" "6" "查看日志"
-    printf " %2s) %s\n" "7" "服务管理"
-    printf " %2s) %s\n" "8" "更新程序"
-    printf " %2s) %s\n" "9" "完全卸载"
-    echo ""
-    echo " [高级配置]"
-    printf " %2s) %s\n" "10" "全局配置（IPv6优先）"
-    printf " %2s) %s\n" "0" "退出"
-    echo -e "${GREEN}====================================${NC}"
-    read -p "输入序号: " choice
+    echo -e "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${BOLD}Shadowsocks-rust 管理菜单${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  安装=${installed_c}  服务=${service_c}  自启=${boot_c}"
+    echo -e "  版本=${version_c}"
+    echo -e "${DIM}  ──────────────────────────────────${NC}"
+    echo -e "  ${BOLD}1${NC})  安装并初始化"
+    echo -e "${DIM}  ──────────────────────────────────${NC}"
+    echo -e "  ${BOLD}2${NC})  查看配置"
+    echo -e "  ${BOLD}3${NC})  新增端口"
+    echo -e "  ${BOLD}4${NC})  修改端口"
+    echo -e "  ${BOLD}5${NC})  删除端口"
+    echo -e "${DIM}  ──────────────────────────────────${NC}"
+    echo -e "  ${BOLD}6${NC})  查看日志"
+    echo -e "  ${BOLD}7${NC})  服务管理"
+    echo -e "  ${BOLD}8${NC})  更新程序"
+    echo -e "  ${BOLD}9${NC})  完全卸载"
+    echo -e "${DIM}  ──────────────────────────────────${NC}"
+    echo -e "  ${BOLD}10${NC}) 全局配置（IPv6优先）"
+    echo -e "  ${BOLD}11${NC}) 屏蔽中国出站（IP/域名）"
+    echo -e "  ${BOLD}0${NC})  退出"
+    echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    read -p "  请选择: " choice
     echo ""
     
     case $choice in
-        1) install_ss ;;
-        2)
-            view_config
-            read -p "按回车返回主菜单..." _
-            ;;
-        3) add_config ;;
-        4) edit_config ;;
-        5) remove_config ;;
-        6) view_logs ;;
-        7) manage_service ;;
-        8) update_ss ;;
-        9) uninstall_ss ;;
+        1) install_ss; press_any_key ;;
+        2) view_config; press_any_key ;;
+        3) add_config; press_any_key ;;
+        4) edit_config; press_any_key ;;
+        5) remove_config; press_any_key ;;
+        6) view_logs; press_any_key ;;
+        7) manage_service; press_any_key ;;
+        8) update_ss; press_any_key ;;
+        9) uninstall_ss; press_any_key ;;
         10)
             if configure_network_options; then
                 if is_service_installed; then
@@ -1239,9 +1510,11 @@ show_menu() {
                     log_warn "服务尚未安装，配置已写入文件，安装后会生效。"
                 fi
             fi
+            press_any_key
             ;;
+        11) configure_block_cn ;;
         0) exit 0 ;;
-        *) log_warn "无效的选项，请重新输入。" ;;
+        *) log_warn "无效的选项，请重新输入。"; press_any_key ;;
     esac
 }
 

@@ -7,7 +7,8 @@
 - 端口级配置（监听地址、加密方式、密钥、DNS、outbound_bind_addr）
 - 服务管理（启动/停止/重启、开机自启开关）
 - 自动更新（仅检测到新版本时更新）
-- 全局配置（`ipv6_first`）
+- 特性：屏蔽中国出站（GeoIP / GeoDomain）防止回国流量被阻断
+- 全新优化的高清 UI，支持安全的实时日志查看（按 q 退出）
 
 脚本文件：`install_ss_rust.sh`
 
@@ -16,7 +17,7 @@
 ## 使用方法
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/qimaoaa/install-ss-rust/refs/heads/main/install_ss_rust.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/qimaoww/install-ss-rust/refs/heads/main/install_ss_rust.sh)
 ```
 
 ---
@@ -40,16 +41,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/qimaoaa/install-ss-rust/refs
   - 改加密方式后，密钥留空会自动生成匹配新密钥
 - 删除端口：序号选择，避免手输端口
 
-### 3) DNS 与网络
+### 3) DNS、网络与路由控制
 
 - DNS 为**端口级配置**（每个端口独立）
-- 全局网络配置仅保留 `ipv6_first`
+- 出站绑定指定的网卡 IP (`outbound_bind_addr`)
+- 全局网络配置包含 `ipv6_first`
+- **屏蔽中国出站**（支持分别屏蔽 CN IP 和 CN 域名，由 GeoData 实时生成 ACL 分流规则）
 
 ### 4) 服务管理
 
 - 启动 / 停止 / 重启
 - 启用 / 关闭开机自启
 - 菜单状态实时显示：安装状态、服务状态、自启状态、当前版本
+- **安全地查看实时日志**：使用内置的 `less` 分页器，支持上下翻页，按 `q` 安全退出，不会中断管理面板
 
 ### 5) 更新
 
