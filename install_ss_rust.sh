@@ -803,8 +803,53 @@ update_ss() {
             log_info "服务当前未运行，已完成二进制更新。"
         fi
     fi
+    log_info "更新完成！"
+}
 
-    log_info "更新完成: ${LATEST_TAG}"
+configure_log_level() {
+    section "切换日志等级"
+    
+    local current_level="info (默认)"
+    if [ -f "${CONF_DIR}/.env" ]; then
+        local env_level
+        env_level=$(grep "^RUST_LOG=" "${CONF_DIR}/.env" | cut -d'=' -f2)
+        [ -n "$env_level" ] && current_level="$env_level"
+    fi
+
+    echo -e "  当前日志等级: ${BOLD}${GREEN}${current_level}${NC}\n"
+    
+    echo -e "  ${BOLD}1.${NC} error (仅错误)"
+    echo -e "  ${BOLD}2.${NC} warn  (警告和错误)"
+    echo -e "  ${BOLD}3.${NC} info  (常规信息，默认)"
+    echo -e "  ${BOLD}4.${NC} debug (调试信息)"
+    echo -e "  ${BOLD}5.${NC} trace (最详细的底层报文)"
+    echo -e "  ${BOLD}0.${NC} 返回主菜单"
+    echo -e "${DIM}──────────────────────────────────${NC}"
+
+    echo -ne "  ${GREEN}➤${NC} 请选择日志等级 [0-5]: "
+    read -r log_choice
+
+    local new_level=""
+    case "$log_choice" in
+        1) new_level="error" ;;
+        2) new_level="warn" ;;
+        3) new_level="info" ;;
+        4) new_level="debug" ;;
+        5) new_level="trace" ;;
+        0|"") return ;;
+        *) log_err "无效的选择"; return ;;
+    esac
+
+    echo "RUST_LOG=${new_level}" > "${CONF_DIR}/.env"
+    
+    if is_service_installed; then
+        log_info "正在应用新的日志等级 (${new_level}) 并重启服务..."
+        systemctl daemon-reload
+        systemctl restart shadowsocks-rust
+        log_info "日志等级已切换！"
+    else
+        log_info "日志等级 (${new_level}) 已保存，将在安装服务后生效。"
+    fi
 }
 
 add_config() {
@@ -956,6 +1001,7 @@ PrivateTmp=true
 PrivateDevices=true
 ReadWritePaths=${CONF_DIR}
 
+EnvironmentFile=-${CONF_DIR}/.env
 ExecStart=${INSTALL_DIR}/ssserver -c ${CONF_FILE}$([ -f "${ACL_FILE}" ] && echo " --acl ${ACL_FILE}")
 Restart=on-failure
 RestartSec=3s
@@ -991,6 +1037,13 @@ view_config() {
         block_cn_domain_status="${YELLOW}未启用${NC}"
     fi
 
+    local current_log_level="info (默认)"
+    if [ -f "${CONF_DIR}/.env" ]; then
+        local env_level
+        env_level=$(grep "^RUST_LOG=" "${CONF_DIR}/.env" | cut -d'=' -f2)
+        [ -n "$env_level" ] && current_log_level="$env_level"
+    fi
+
     echo -e "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  ${BOLD}当前配置信息${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -1000,7 +1053,8 @@ view_config() {
     echo -e "  IPv6优先    ${IPV6_FIRST}"
     echo -e "  屏蔽CN IP   ${block_cn_ip_status}"
     echo -e "  屏蔽CN 域名  ${block_cn_domain_status}"
-
+    echo -e "  日志等级    ${BOLD}${current_log_level}${NC}"
+    echo -e "${DIM}────────────────────────────────────${NC}"
     # 读取所有服务器配置
     SERVER_COUNT=$(jq '.servers | length' "${CONF_FILE}")
     
@@ -1479,13 +1533,14 @@ show_menu() {
     echo -e "  ${BOLD}4${NC})  修改端口"
     echo -e "  ${BOLD}5${NC})  删除端口"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
-    echo -e "  ${BOLD}6${NC})  查看日志"
+    echo -e "  ${BOLD}6${NC})  查看实时日志"
     echo -e "  ${BOLD}7${NC})  服务管理"
     echo -e "  ${BOLD}8${NC})  更新程序"
     echo -e "  ${BOLD}9${NC})  完全卸载"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
     echo -e "  ${BOLD}10${NC}) 全局配置（IPv6优先）"
     echo -e "  ${BOLD}11${NC}) 屏蔽中国出站（IP/域名）"
+    echo -e "  ${BOLD}12${NC}) 切换日志等级（debug/info/warn等）"
     echo -e "  ${BOLD}0${NC})  退出"
     echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     read -p "  请选择: " choice
@@ -1512,7 +1567,8 @@ show_menu() {
             fi
             press_any_key
             ;;
-        11) configure_block_cn ;;
+        11) configure_block_cn; press_any_key ;;
+        12) configure_log_level; press_any_key ;;
         0) exit 0 ;;
         *) log_warn "无效的选项，请重新输入。"; press_any_key ;;
     esac
