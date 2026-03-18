@@ -15,6 +15,7 @@ CN_IP_CACHE="${CONF_DIR}/.cn_ip.cache"
 CN_DOMAIN_CACHE="${CONF_DIR}/.cn_domain.cache"
 CN_IP_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geoip/cn.list"
 CN_DOMAIN_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geosite/geolocation-cn.list"
+ALLOW_LAN_CACHE="${CONF_DIR}/.allow_lan.cache"
 PORT_MIN=10000
 PORT_MAX=65535
 
@@ -331,32 +332,11 @@ rebuild_cn_acl() {
 
     mkdir -p "${CONF_DIR}"
     cat > "${ACL_FILE}" <<'ACLHEADER'
-# Shadowsocks-rust ACL: 禁止出站到中国 IP/域名 和私有地址段
+# Shadowsocks-rust ACL: 禁止出站到中国 IP/域名
 # 由 install_ss_rust.sh 自动生成
 # 数据来源: https://github.com/MetaCubeX/meta-rules-dat
 
 [outbound_block_list]
-# --- 私有/保留地址段 ---
-0.0.0.0/8
-10.0.0.0/8
-100.64.0.0/10
-127.0.0.0/8
-169.254.0.0/16
-172.16.0.0/12
-192.0.0.0/24
-192.0.2.0/24
-192.88.99.0/24
-192.168.0.0/16
-198.18.0.0/15
-198.51.100.0/24
-203.0.113.0/24
-224.0.0.0/4
-240.0.0.0/4
-255.255.255.255/32
-::1/128
-::ffff:127.0.0.1/104
-fc00::/7
-fe80::/10
 ACLHEADER
 
     if [ "$has_ip" -eq 1 ]; then
@@ -380,8 +360,10 @@ configure_block_cn() {
     local choice=""
     local ip_status=""
     local domain_status=""
+    local lan_status=""
     local ip_tag=""
     local domain_tag=""
+    local lan_tag=""
 
     while true; do
         if [ -f "${CN_IP_CACHE}" ]; then
@@ -398,22 +380,44 @@ configure_block_cn() {
             domain_status="${DIM}○ 未启用${NC}"
             domain_tag="启用"
         fi
+        if [ ! -f "${ALLOW_LAN_CACHE}" ]; then
+            lan_status="${GREEN}● 已启用${NC}"
+            lan_tag="禁用"
+        else
+            lan_status="${DIM}○ 未启用${NC}"
+            lan_tag="启用"
+        fi
 
         echo -e "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  ${BOLD}屏蔽中国出站${NC} ${DIM}(GeoIP / GeoSite)${NC}"
+        echo -e "  ${BOLD}出站 ACL 控制${NC} ${DIM}(局域网 / 中国大陆)${NC}"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  屏蔽私有 IP  :  ${lan_status} ${DIM}(防止 SSRF/允许内网DNS)${NC}"
         echo -e "  屏蔽 CN IP   :  ${ip_status}"
         echo -e "  屏蔽 CN 域名 :  ${domain_status}"
         echo -e "${DIM}  ──────────────────────────────────${NC}"
-        echo -e "  ${BOLD}1${NC})  ${ip_tag}屏蔽 CN IP"
-        echo -e "  ${BOLD}2${NC})  ${domain_tag}屏蔽 CN 域名"
-        echo -e "  ${BOLD}3${NC})  更新列表（重新下载已启用项）"
+        echo -e "  ${BOLD}1${NC})  ${lan_tag}屏蔽私有 IP ${DIM}(局域网)${NC}"
+        echo -e "  ${BOLD}2${NC})  ${ip_tag}屏蔽 CN IP"
+        echo -e "  ${BOLD}3${NC})  ${domain_tag}屏蔽 CN 域名"
+        echo -e "  ${BOLD}4${NC})  更新列表（重新下载已启用项）"
         echo -e "  ${BOLD}0${NC})  返回主菜单"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -p "  请选择: " choice
 
         case "$choice" in
             1)
+                if [ ! -f "${ALLOW_LAN_CACHE}" ]; then
+                    touch "${ALLOW_LAN_CACHE}"
+                    rebuild_cn_acl
+                    rebuild_service_file
+                    log_info "已禁用屏蔽私有 IP（现允许访问局域网）。"
+                else
+                    rm -f "${ALLOW_LAN_CACHE}"
+                    rebuild_cn_acl
+                    rebuild_service_file
+                    log_info "已启用屏蔽私有 IP（现在禁止访问局域网）。"
+                fi
+                ;;
+            2)
                 if [ -f "${CN_IP_CACHE}" ]; then
                     rm -f "${CN_IP_CACHE}"
                     rebuild_cn_acl
@@ -427,7 +431,7 @@ configure_block_cn() {
                     fi
                 fi
                 ;;
-            2)
+            3)
                 if [ -f "${CN_DOMAIN_CACHE}" ]; then
                     rm -f "${CN_DOMAIN_CACHE}"
                     rebuild_cn_acl
@@ -441,7 +445,7 @@ configure_block_cn() {
                     fi
                 fi
                 ;;
-            3)
+            4)
                 local updated=0
                 if [ -f "${CN_IP_CACHE}" ]; then
                     download_cn_ip && updated=1
@@ -454,7 +458,7 @@ configure_block_cn() {
                     rebuild_service_file
                     log_info "列表已更新。"
                 else
-                    log_warn "当前没有启用任何屏蔽项，无需更新。"
+                    log_warn "当前没有启用任何下载项，无需更新。"
                 fi
                 ;;
             0|"")
@@ -1024,6 +1028,13 @@ view_config() {
     local service_status=""
     service_status=$(is_service_running && echo -e "${GREEN}运行中${NC}" || echo -e "${RED}未运行${NC}")
 
+    local block_lan_status=""
+    if [ ! -f "${ALLOW_LAN_CACHE}" ]; then
+        block_lan_status="${GREEN}已启用${NC}"
+    else
+        block_lan_status="${YELLOW}未启用${NC}"
+    fi
+
     local block_cn_ip_status=""
     local block_cn_domain_status=""
     if [ -f "${CN_IP_CACHE}" ]; then
@@ -1051,6 +1062,7 @@ view_config() {
     echo -e "  服务状态    ${service_status}"
     echo -e "  服务器IP    ${BOLD}${IP}${NC}"
     echo -e "  IPv6优先    ${IPV6_FIRST}"
+    echo -e "  屏蔽私有IP  ${block_lan_status}"
     echo -e "  屏蔽CN IP   ${block_cn_ip_status}"
     echo -e "  屏蔽CN 域名  ${block_cn_domain_status}"
     echo -e "  日志等级    ${BOLD}${current_log_level}${NC}"
@@ -1534,7 +1546,7 @@ show_menu() {
     echo -e "  ${BOLD}5${NC})  删除端口"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
     echo -e "  ${BOLD}6${NC})  全局配置（IPv6优先）"
-    echo -e "  ${BOLD}7${NC})  屏蔽中国出站（IP/域名）"
+    echo -e "  ${BOLD}7${NC})  出站 ACL 控制 (局域网 / 中国大陆)"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
     echo -e "  ${BOLD}8${NC})  查看实时日志"
     echo -e "  ${BOLD}9${NC})  切换日志等级（debug/info/warn等）"
