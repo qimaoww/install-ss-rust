@@ -15,7 +15,6 @@ CN_IP_CACHE="${CONF_DIR}/.cn_ip.cache"
 CN_DOMAIN_CACHE="${CONF_DIR}/.cn_domain.cache"
 CN_IP_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geoip/cn.list"
 CN_DOMAIN_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geosite/geolocation-cn.list"
-ALLOW_LAN_CACHE="${CONF_DIR}/.allow_lan.cache"
 PORT_MIN=10000
 PORT_MAX=65535
 
@@ -360,10 +359,8 @@ configure_block_cn() {
     local choice=""
     local ip_status=""
     local domain_status=""
-    local lan_status=""
     local ip_tag=""
     local domain_tag=""
-    local lan_tag=""
 
     while true; do
         if [ -f "${CN_IP_CACHE}" ]; then
@@ -380,44 +377,22 @@ configure_block_cn() {
             domain_status="${DIM}○ 未启用${NC}"
             domain_tag="启用"
         fi
-        if [ ! -f "${ALLOW_LAN_CACHE}" ]; then
-            lan_status="${GREEN}● 已启用${NC}"
-            lan_tag="禁用"
-        else
-            lan_status="${DIM}○ 未启用${NC}"
-            lan_tag="启用"
-        fi
 
         echo -e "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  ${BOLD}出站 ACL 控制${NC} ${DIM}(局域网 / 中国大陆)${NC}"
+        echo -e "  ${BOLD}屏蔽中国出站${NC} ${DIM}(GeoIP / GeoSite)${NC}"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  屏蔽私有 IP  :  ${lan_status} ${DIM}(防止 SSRF/允许内网DNS)${NC}"
         echo -e "  屏蔽 CN IP   :  ${ip_status}"
         echo -e "  屏蔽 CN 域名 :  ${domain_status}"
         echo -e "${DIM}  ──────────────────────────────────${NC}"
-        echo -e "  ${BOLD}1${NC})  ${lan_tag}屏蔽私有 IP ${DIM}(局域网)${NC}"
-        echo -e "  ${BOLD}2${NC})  ${ip_tag}屏蔽 CN IP"
-        echo -e "  ${BOLD}3${NC})  ${domain_tag}屏蔽 CN 域名"
-        echo -e "  ${BOLD}4${NC})  更新列表（重新下载已启用项）"
+        echo -e "  ${BOLD}1${NC})  ${ip_tag}屏蔽 CN IP"
+        echo -e "  ${BOLD}2${NC})  ${domain_tag}屏蔽 CN 域名"
+        echo -e "  ${BOLD}3${NC})  更新列表（重新下载已启用项）"
         echo -e "  ${BOLD}0${NC})  返回主菜单"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -p "  请选择: " choice
 
         case "$choice" in
             1)
-                if [ ! -f "${ALLOW_LAN_CACHE}" ]; then
-                    touch "${ALLOW_LAN_CACHE}"
-                    rebuild_cn_acl
-                    rebuild_service_file
-                    log_info "已禁用屏蔽私有 IP（现允许访问局域网）。"
-                else
-                    rm -f "${ALLOW_LAN_CACHE}"
-                    rebuild_cn_acl
-                    rebuild_service_file
-                    log_info "已启用屏蔽私有 IP（现在禁止访问局域网）。"
-                fi
-                ;;
-            2)
                 if [ -f "${CN_IP_CACHE}" ]; then
                     rm -f "${CN_IP_CACHE}"
                     rebuild_cn_acl
@@ -431,7 +406,7 @@ configure_block_cn() {
                     fi
                 fi
                 ;;
-            3)
+            2)
                 if [ -f "${CN_DOMAIN_CACHE}" ]; then
                     rm -f "${CN_DOMAIN_CACHE}"
                     rebuild_cn_acl
@@ -445,7 +420,7 @@ configure_block_cn() {
                     fi
                 fi
                 ;;
-            4)
+            3)
                 local updated=0
                 if [ -f "${CN_IP_CACHE}" ]; then
                     download_cn_ip && updated=1
@@ -1028,13 +1003,6 @@ view_config() {
     local service_status=""
     service_status=$(is_service_running && echo -e "${GREEN}运行中${NC}" || echo -e "${RED}未运行${NC}")
 
-    local block_lan_status=""
-    if [ ! -f "${ALLOW_LAN_CACHE}" ]; then
-        block_lan_status="${GREEN}已启用${NC}"
-    else
-        block_lan_status="${YELLOW}未启用${NC}"
-    fi
-
     local block_cn_ip_status=""
     local block_cn_domain_status=""
     if [ -f "${CN_IP_CACHE}" ]; then
@@ -1062,7 +1030,6 @@ view_config() {
     echo -e "  服务状态    ${service_status}"
     echo -e "  服务器IP    ${BOLD}${IP}${NC}"
     echo -e "  IPv6优先    ${IPV6_FIRST}"
-    echo -e "  屏蔽私有IP  ${block_lan_status}"
     echo -e "  屏蔽CN IP   ${block_cn_ip_status}"
     echo -e "  屏蔽CN 域名  ${block_cn_domain_status}"
     echo -e "  日志等级    ${BOLD}${current_log_level}${NC}"
