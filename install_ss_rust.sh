@@ -1343,12 +1343,10 @@ view_logs() {
         log_err "服务未安装。"
         return
     fi
-    section "服务日志 (按 Ctrl+C 退出返回主菜单)"
+    section "服务日志"
     
-    # 临时忽略 SIGINT，让子进程(journalctl)接收信号并退出，脚本继续运行
-    trap '' INT
-    journalctl -u shadowsocks-rust -n 100 -f
-    trap - INT
+    # 使用 less +F 实时跟随日志，底部显示操作提示
+    journalctl -u shadowsocks-rust -n 100 -f 2>&1 | less -R +F -P "按 q 退出, Ctrl+C 暂停滚动, Shift+F 恢复"
 }
 
 manage_service() {
