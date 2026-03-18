@@ -1346,7 +1346,7 @@ view_logs() {
     section "服务日志"
     
     # 使用 less +F 实时跟随日志，底部显示操作提示
-    journalctl -u shadowsocks-rust -n 100 -f 2>&1 | less -R +F -P "按 q 退出, Ctrl+C 暂停滚动, Shift+F 恢复"
+    journalctl -u shadowsocks-rust -n 100 -f 2>&1 | less -R +F -P "Press q to quit, Ctrl+C to pause, Shift+F to resume"
 }
 
 manage_service() {
