@@ -1513,7 +1513,7 @@ show_menu() {
     echo -e "  ${BOLD}5${NC})  删除端口"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
     echo -e "  ${BOLD}6${NC})  全局配置（IPv6优先）"
-    echo -e "  ${BOLD}7${NC})  出站 ACL 控制 (局域网 / 中国大陆)"
+    echo -e "  ${BOLD}7${NC})  出站 ACL 控制"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
     echo -e "  ${BOLD}8${NC})  查看实时日志"
     echo -e "  ${BOLD}9${NC})  切换日志等级（debug/info/warn等）"
