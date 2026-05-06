@@ -8,6 +8,7 @@
 - 服务管理（启动/停止/重启、开机自启开关）
 - 自动更新（仅检测到新版本时更新）
 - 特性：屏蔽中国出站（GeoIP / GeoDomain）防止回国流量被阻断
+- 特性：入站 CN IP 屏蔽，手动开启后阻止中国来源 IP 连接已配置的 ssserver 端口
 - 全新优化的高清 UI，支持安全的实时日志查看（按 q 退出）
 
 脚本文件：`install_ss_rust.sh`
@@ -27,6 +28,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/qimaoww/install-ss-rust/refs
 ### 1) 安装与修复
 
 - 自动安装依赖：`curl`、`jq`、`tar`、`xz`、`awk`
+- 手动开启入站 CN IP 屏蔽时需要防火墙工具：优先使用 `nftables`，不可用时回退到 `iptables` + `ipset`
 - 自动识别架构：`x86_64` / `aarch64`
 - 从官方 Releases 下载最新版本并安装二进制
 - 自动创建 systemd 服务并启动
@@ -47,6 +49,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/qimaoww/install-ss-rust/refs
 - 出站绑定指定的网卡 IP (`outbound_bind_addr`)
 - 全局网络配置包含 `ipv6_first`
 - **屏蔽中国出站**（支持分别屏蔽 CN IP 和 CN 域名，由 GeoData 实时生成 ACL 分流规则）
+- **入站 CN IP 屏蔽**（独立菜单手动开启，不在安装时引导；自动读取当前所有 ssserver 端口，为 TCP/UDP 添加入站丢弃规则；后续新增、修改、删除端口会同步重应用）
+- 手动开启入站 CN IP 屏蔽后会安装一个脚本专用 systemd oneshot，用于开机后重应用规则；禁用或卸载时会移除。
+- 防火墙规则只管理脚本自有对象：`nftables` 使用 `table inet ss_rust`，回退方案使用 `ipset ss_rust_cn_ipv4` 与 `iptables` 链 `SS_RUST_CN_BLOCK`
 
 ### 4) 系统与服务管理
 

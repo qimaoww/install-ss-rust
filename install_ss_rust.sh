@@ -13,6 +13,19 @@ SERVICE_FILE="/etc/systemd/system/shadowsocks-rust.service"
 ACL_FILE="${CONF_DIR}/block_cn.acl"
 CN_IP_CACHE="${CONF_DIR}/.cn_ip.cache"
 CN_DOMAIN_CACHE="${CONF_DIR}/.cn_domain.cache"
+INBOUND_CN_IP_CACHE="${CONF_DIR}/.inbound_cn_ip.cache"
+INBOUND_CN_BLOCK_ENABLED_FILE="${CONF_DIR}/.inbound_cn_block.enabled"
+INBOUND_CN_BLOCK_BACKEND_FILE="${CONF_DIR}/.inbound_cn_block.backend"
+INBOUND_CN_REAPPLY_SERVICE_NAME="shadowsocks-rust-inbound-cn-block.service"
+INBOUND_CN_REAPPLY_SERVICE="/etc/systemd/system/shadowsocks-rust-inbound-cn-block.service"
+INBOUND_CN_REAPPLY_SCRIPT="${CONF_DIR}/inbound_cn_block_reapply.sh"
+INBOUND_CN_NFT_RULES_FILE="${CONF_DIR}/inbound_cn_block.nft"
+INBOUND_CN_RANGES_FILE="${CONF_DIR}/inbound_cn_ipv4.ranges"
+INBOUND_CN_NFT_TABLE="ss_rust"
+INBOUND_CN_NFT_SET="cn_ipv4"
+INBOUND_CN_NFT_CHAIN="inbound_cn_block"
+INBOUND_CN_IPSET="ss_rust_cn_ipv4"
+INBOUND_CN_IPTABLES_CHAIN="SS_RUST_CN_BLOCK"
 CN_IP_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geoip/cn.list"
 CN_DOMAIN_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geosite/geolocation-cn.list"
 PORT_MIN=10000
@@ -151,6 +164,15 @@ get_pkg_name() {
                 echo "iproute"
             fi
             ;;
+        nft)
+            echo "nftables"
+            ;;
+        iptables)
+            echo "iptables"
+            ;;
+        ipset)
+            echo "ipset"
+            ;;
         *) echo "$cmd" ;;
     esac
 }
@@ -277,26 +299,36 @@ select_outbound_bind_addr() {
     done
 }
 
-download_cn_ip() {
+download_cn_ip_to() {
+    local target_file="$1"
+    local label="${2:-中国 IP 列表}"
     local tmp_file=""
     tmp_file=$(mktemp /tmp/cn_ip.XXXXXX)
 
-    log_info "正在下载中国 IP 列表..."
+    log_info "正在下载${label}..."
     if ! curl -fsSL --retry 3 --connect-timeout 15 -o "$tmp_file" "${CN_IP_URL}"; then
         rm -f "$tmp_file"
-        log_err "下载中国 IP 列表失败，请检查网络连接。"
+        log_err "下载${label}失败，请检查网络连接。"
         return 1
     fi
     if [ ! -s "$tmp_file" ]; then
         rm -f "$tmp_file"
-        log_err "下载的中国 IP 列表为空。"
+        log_err "下载的${label}为空。"
         return 1
     fi
     mkdir -p "${CONF_DIR}"
-    mv "$tmp_file" "${CN_IP_CACHE}"
-    chmod 644 "${CN_IP_CACHE}"
-    log_info "中国 IP 列表已保存，共 $(wc -l < "${CN_IP_CACHE}") 条。"
+    mv "$tmp_file" "$target_file"
+    chmod 644 "$target_file"
+    log_info "${label}已保存，共 $(wc -l < "$target_file") 条。"
     return 0
+}
+
+download_cn_ip() {
+    download_cn_ip_to "${CN_IP_CACHE}" "中国 IP 列表"
+}
+
+download_inbound_cn_ip() {
+    download_cn_ip_to "${INBOUND_CN_IP_CACHE}" "入站 CN IP 列表"
 }
 
 download_cn_domain() {
@@ -331,6 +363,639 @@ download_cn_domain() {
     chmod 644 "${CN_DOMAIN_CACHE}"
     log_info "中国域名列表已保存，共 $(wc -l < "${CN_DOMAIN_CACHE}") 条。"
     return 0
+}
+
+get_ss_ports() {
+    local ports_text=""
+
+    if [ ! -f "${CONF_FILE}" ]; then
+        log_err "配置文件不存在，无法读取端口。"
+        return 1
+    fi
+
+    if ! ports_text=$(jq -r '.servers[]?.server_port // empty' "${CONF_FILE}" 2>/dev/null | awk '/^[0-9]+$/ {print}' | sort -n -u); then
+        log_err "读取 ssserver 端口失败，请检查配置文件格式。"
+        return 1
+    fi
+    if [ -z "${ports_text}" ]; then
+        log_err "未找到任何 ssserver 端口。"
+        return 1
+    fi
+
+    printf '%s\n' "${ports_text}"
+}
+
+inbound_cn_block_enabled() {
+    [ -f "${INBOUND_CN_BLOCK_ENABLED_FILE}" ]
+}
+
+install_firewall_cmds() {
+    local cmd=""
+    local pkg=""
+    local -a missing_cmds=()
+
+    for cmd in "$@"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_cmds+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing_cmds[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        if ! apt-get update -qq; then
+            log_err "更新 apt 软件源失败，请手动安装: ${missing_cmds[*]}"
+            return 1
+        fi
+        for cmd in "${missing_cmds[@]}"; do
+            pkg=$(get_pkg_name "$cmd" "apt")
+            log_info "正在安装 ${pkg}..."
+            if ! apt-get install -yqq "$pkg"; then
+                log_err "安装 ${pkg} 失败。"
+                return 1
+            fi
+        done
+    elif command -v yum >/dev/null 2>&1; then
+        for cmd in "${missing_cmds[@]}"; do
+            pkg=$(get_pkg_name "$cmd" "yum")
+            log_info "正在安装 ${pkg}..."
+            if ! yum install -yq "$pkg"; then
+                log_err "安装 ${pkg} 失败。"
+                return 1
+            fi
+        done
+    else
+        log_err "未找到支持的包管理器。请手动安装: ${missing_cmds[*]}"
+        return 1
+    fi
+
+    for cmd in "$@"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            log_err "依赖 ${cmd} 安装后仍不可用。"
+            return 1
+        fi
+    done
+}
+
+ensure_firewall_dependencies() {
+    SELECTED_FIREWALL_BACKEND=""
+
+    if command -v nft >/dev/null 2>&1; then
+        SELECTED_FIREWALL_BACKEND="nft"
+        return 0
+    fi
+
+    if install_firewall_cmds nft; then
+        SELECTED_FIREWALL_BACKEND="nft"
+        return 0
+    fi
+
+    if command -v iptables >/dev/null 2>&1 && command -v ipset >/dev/null 2>&1; then
+        SELECTED_FIREWALL_BACKEND="iptables"
+        return 0
+    fi
+
+    if install_firewall_cmds iptables ipset; then
+        SELECTED_FIREWALL_BACKEND="iptables"
+        return 0
+    fi
+
+    log_err "未找到可用防火墙后端，请安装 nftables，或安装 iptables 与 ipset。"
+    return 1
+}
+
+inbound_backend_available() {
+    local backend="$1"
+
+    case "$backend" in
+        nft)
+            command -v nft >/dev/null 2>&1
+            ;;
+        iptables)
+            command -v iptables >/dev/null 2>&1 && command -v ipset >/dev/null 2>&1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+is_valid_ipv4_cidr() {
+    local cidr="$1"
+    local ip=""
+    local prefix="32"
+
+    [[ "$cidr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] || return 1
+    ip="${cidr%%/*}"
+    if [[ "$cidr" == */* ]]; then
+        prefix="${cidr#*/}"
+    fi
+
+    is_valid_ipv4 "$ip" || return 1
+    [[ "$prefix" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$prefix >= 1 && 10#$prefix <= 32 )) || return 1
+}
+
+get_inbound_cn_ipv4_ranges() {
+    local line=""
+    local tmp_ranges=""
+
+    if [ ! -s "${INBOUND_CN_IP_CACHE}" ]; then
+        log_err "入站 CN IP 列表不存在或为空。"
+        return 1
+    fi
+
+    tmp_ranges=$(mktemp /tmp/ss-rust-cn-ipv4.XXXXXX)
+    while IFS= read -r line; do
+        line=$(trim_ws "$line")
+        [ -n "$line" ] || continue
+        [[ "$line" == \#* ]] && continue
+        [[ "$line" == *:* ]] && continue
+
+        if ! is_valid_ipv4_cidr "$line"; then
+            rm -f "$tmp_ranges"
+            log_err "入站 CN IP 列表包含无效 IPv4/CIDR 条目: ${line}"
+            return 1
+        fi
+        printf '%s\n' "$line" >> "$tmp_ranges"
+    done < "${INBOUND_CN_IP_CACHE}"
+
+    if [ ! -s "$tmp_ranges" ]; then
+        rm -f "$tmp_ranges"
+        log_err "入站 CN IPv4 列表为空。"
+        return 1
+    fi
+
+    sort -u "$tmp_ranges"
+    rm -f "$tmp_ranges"
+}
+
+join_lines_by_comma() {
+    local item=""
+    local joined=""
+
+    while IFS= read -r item; do
+        [ -n "$item" ] || continue
+        if [ -n "$joined" ]; then
+            joined+=", "
+        fi
+        joined+="$item"
+    done
+
+    printf '%s' "$joined"
+}
+
+build_inbound_cn_runtime_files() {
+    local ports_text=""
+    local ranges_text=""
+    local ports_expr=""
+    local range=""
+    local first=1
+    local tmp_nft=""
+    local tmp_ranges=""
+    local -a ports=()
+    local -a ranges=()
+
+    if ! ports_text=$(get_ss_ports); then
+        return 1
+    fi
+    if ! ranges_text=$(get_inbound_cn_ipv4_ranges); then
+        return 1
+    fi
+
+    mapfile -t ports <<< "${ports_text}"
+    mapfile -t ranges <<< "${ranges_text}"
+    if [ ${#ranges[@]} -eq 0 ]; then
+        log_err "入站 CN IPv4 列表为空。"
+        return 1
+    fi
+
+    ports_expr=$(printf '%s\n' "${ports[@]}" | join_lines_by_comma)
+    tmp_nft=$(mktemp /tmp/ss-rust-inbound-cn.XXXXXX.nft)
+    tmp_ranges=$(mktemp /tmp/ss-rust-cn-ipv4.XXXXXX)
+
+    {
+        printf 'table inet %s {\n' "${INBOUND_CN_NFT_TABLE}"
+        printf '    set %s {\n' "${INBOUND_CN_NFT_SET}"
+        printf '        type ipv4_addr\n'
+        printf '        flags interval\n'
+        printf '        auto-merge\n'
+        printf '        elements = {\n'
+        for range in "${ranges[@]}"; do
+            if [ "$first" -eq 1 ]; then
+                printf '            %s' "$range"
+                first=0
+            else
+                printf ',\n            %s' "$range"
+            fi
+            printf '%s\n' "$range" >> "$tmp_ranges"
+        done
+        printf '\n        }\n'
+        printf '    }\n'
+        printf '    chain %s {\n' "${INBOUND_CN_NFT_CHAIN}"
+        printf '        type filter hook input priority 0; policy accept;\n'
+        printf '        ip saddr @%s tcp dport { %s } drop\n' "${INBOUND_CN_NFT_SET}" "$ports_expr"
+        printf '        ip saddr @%s udp dport { %s } drop\n' "${INBOUND_CN_NFT_SET}" "$ports_expr"
+        printf '    }\n'
+        printf '}\n'
+    } > "$tmp_nft"
+
+    mkdir -p "${CONF_DIR}"
+    mv "$tmp_nft" "${INBOUND_CN_NFT_RULES_FILE}"
+    mv "$tmp_ranges" "${INBOUND_CN_RANGES_FILE}"
+    chmod 644 "${INBOUND_CN_NFT_RULES_FILE}" "${INBOUND_CN_RANGES_FILE}"
+}
+
+install_inbound_cn_reapply_service() {
+    mkdir -p "${CONF_DIR}"
+
+    cat > "${INBOUND_CN_REAPPLY_SCRIPT}" <<EOF
+#!/bin/bash
+set -euo pipefail
+
+CONF_FILE="${CONF_FILE}"
+ENABLED_FILE="${INBOUND_CN_BLOCK_ENABLED_FILE}"
+BACKEND_FILE="${INBOUND_CN_BLOCK_BACKEND_FILE}"
+NFT_RULES_FILE="${INBOUND_CN_NFT_RULES_FILE}"
+RANGES_FILE="${INBOUND_CN_RANGES_FILE}"
+NFT_TABLE="${INBOUND_CN_NFT_TABLE}"
+IPSET_NAME="${INBOUND_CN_IPSET}"
+IPTABLES_CHAIN="${INBOUND_CN_IPTABLES_CHAIN}"
+
+[ -f "\${ENABLED_FILE}" ] || exit 0
+[ -f "\${CONF_FILE}" ] || exit 0
+backend=""
+if [ -f "\${BACKEND_FILE}" ]; then
+    backend=\$(tr -d '[:space:]' < "\${BACKEND_FILE}")
+fi
+if [ -z "\${backend}" ]; then
+    if command -v nft >/dev/null 2>&1; then
+        backend="nft"
+    elif command -v iptables >/dev/null 2>&1 && command -v ipset >/dev/null 2>&1; then
+        backend="iptables"
+    else
+        exit 0
+    fi
+fi
+
+mapfile -t ports < <(jq -r '.servers[]?.server_port // empty' "\${CONF_FILE}" 2>/dev/null | awk '/^[0-9]+$/ {print}' | sort -n -u)
+if [ "\${#ports[@]}" -eq 0 ]; then
+    if command -v nft >/dev/null 2>&1; then
+        nft delete table inet "\${NFT_TABLE}" 2>/dev/null || true
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        while iptables -C INPUT -j "\${IPTABLES_CHAIN}" 2>/dev/null; do
+            iptables -D INPUT -j "\${IPTABLES_CHAIN}" 2>/dev/null || break
+        done
+        iptables -F "\${IPTABLES_CHAIN}" 2>/dev/null || true
+        iptables -X "\${IPTABLES_CHAIN}" 2>/dev/null || true
+    fi
+    if command -v ipset >/dev/null 2>&1; then
+        ipset destroy "\${IPSET_NAME}" 2>/dev/null || true
+    fi
+    exit 0
+fi
+
+case "\${backend}" in
+    nft)
+        command -v nft >/dev/null 2>&1 || exit 0
+        [ -s "\${NFT_RULES_FILE}" ] || exit 0
+        nft -c -f "\${NFT_RULES_FILE}" >/dev/null 2>&1 || exit 0
+        nft delete table inet "\${NFT_TABLE}" 2>/dev/null || true
+        nft -f "\${NFT_RULES_FILE}"
+        ;;
+    iptables)
+        command -v iptables >/dev/null 2>&1 || exit 0
+        command -v ipset >/dev/null 2>&1 || exit 0
+        [ -s "\${RANGES_FILE}" ] || exit 0
+        tmp_set="\${IPSET_NAME}_tmp_\$\$"
+        ipset destroy "\${tmp_set}" 2>/dev/null || true
+        ipset create "\${tmp_set}" hash:net family inet -exist
+        ipset flush "\${tmp_set}" 2>/dev/null || true
+        while IFS= read -r range; do
+            [ -n "\${range}" ] || continue
+            ipset add "\${tmp_set}" "\${range}" -exist
+        done < "\${RANGES_FILE}"
+        if ipset list "\${IPSET_NAME}" >/dev/null 2>&1; then
+            ipset swap "\${tmp_set}" "\${IPSET_NAME}"
+            ipset destroy "\${tmp_set}" 2>/dev/null || true
+        else
+            ipset rename "\${tmp_set}" "\${IPSET_NAME}"
+        fi
+        iptables -N "\${IPTABLES_CHAIN}" 2>/dev/null || true
+        iptables -F "\${IPTABLES_CHAIN}"
+        for port in "\${ports[@]}"; do
+            iptables -A "\${IPTABLES_CHAIN}" -p tcp --dport "\${port}" -m set --match-set "\${IPSET_NAME}" src -j DROP
+            iptables -A "\${IPTABLES_CHAIN}" -p udp --dport "\${port}" -m set --match-set "\${IPSET_NAME}" src -j DROP
+        done
+        if ! iptables -C INPUT -j "\${IPTABLES_CHAIN}" 2>/dev/null; then
+            iptables -I INPUT -j "\${IPTABLES_CHAIN}"
+        fi
+        ;;
+esac
+EOF
+    chmod 755 "${INBOUND_CN_REAPPLY_SCRIPT}"
+
+    cat > "${INBOUND_CN_REAPPLY_SERVICE}" <<EOF
+[Unit]
+Description=Reapply Shadowsocks-rust inbound CN IP block
+After=network-online.target
+Wants=network-online.target
+Before=shadowsocks-rust.service
+
+[Service]
+Type=oneshot
+ExecStart=${INBOUND_CN_REAPPLY_SCRIPT}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload
+        systemctl enable "${INBOUND_CN_REAPPLY_SERVICE_NAME}" >/dev/null 2>&1 || true
+    fi
+}
+
+remove_inbound_cn_reapply_service() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable "${INBOUND_CN_REAPPLY_SERVICE_NAME}" >/dev/null 2>&1 || true
+    fi
+    rm -f "${INBOUND_CN_REAPPLY_SERVICE}" "${INBOUND_CN_REAPPLY_SCRIPT}"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+}
+
+remove_inbound_cn_block_nft() {
+    if command -v nft >/dev/null 2>&1; then
+        nft delete table inet "${INBOUND_CN_NFT_TABLE}" 2>/dev/null || true
+    fi
+}
+
+remove_inbound_cn_block_iptables() {
+    if command -v iptables >/dev/null 2>&1; then
+        while iptables -C INPUT -j "${INBOUND_CN_IPTABLES_CHAIN}" 2>/dev/null; do
+            iptables -D INPUT -j "${INBOUND_CN_IPTABLES_CHAIN}" 2>/dev/null || break
+        done
+        iptables -F "${INBOUND_CN_IPTABLES_CHAIN}" 2>/dev/null || true
+        iptables -X "${INBOUND_CN_IPTABLES_CHAIN}" 2>/dev/null || true
+    fi
+
+    if command -v ipset >/dev/null 2>&1; then
+        ipset destroy "${INBOUND_CN_IPSET}" 2>/dev/null || true
+    fi
+}
+
+apply_inbound_cn_block_nft() {
+    if ! command -v nft >/dev/null 2>&1; then
+        log_err "未找到 nft 命令。"
+        return 1
+    fi
+
+    build_inbound_cn_runtime_files || return 1
+
+    if ! nft -c -f "${INBOUND_CN_NFT_RULES_FILE}" >/dev/null 2>&1; then
+        log_err "校验 nftables 入站 CN IP 屏蔽规则失败。"
+        return 1
+    fi
+
+    nft delete table inet "${INBOUND_CN_NFT_TABLE}" 2>/dev/null || true
+    if ! nft -f "${INBOUND_CN_NFT_RULES_FILE}"; then
+        log_err "应用 nftables 入站 CN IP 屏蔽规则失败。"
+        return 1
+    fi
+
+    return 0
+}
+
+apply_inbound_cn_block_iptables() {
+    local ports_text=""
+    local range=""
+    local port=""
+    local tmp_set="${INBOUND_CN_IPSET}_tmp_$$"
+    local -a ports=()
+    local -a ranges=()
+
+    if ! command -v iptables >/dev/null 2>&1 || ! command -v ipset >/dev/null 2>&1; then
+        log_err "未找到 iptables 或 ipset 命令。"
+        return 1
+    fi
+    if ! ports_text=$(get_ss_ports); then
+        return 1
+    fi
+    build_inbound_cn_runtime_files || return 1
+
+    mapfile -t ports <<< "${ports_text}"
+    mapfile -t ranges < "${INBOUND_CN_RANGES_FILE}"
+    if [ ${#ranges[@]} -eq 0 ]; then
+        log_err "中国 IPv4 列表为空。"
+        return 1
+    fi
+
+    ipset destroy "$tmp_set" 2>/dev/null || true
+    if ! ipset create "$tmp_set" hash:net family inet -exist; then
+        log_err "创建临时 ipset 失败。"
+        return 1
+    fi
+    ipset flush "$tmp_set" 2>/dev/null || true
+    for range in "${ranges[@]}"; do
+        if ! ipset add "$tmp_set" "$range" -exist; then
+            ipset destroy "$tmp_set" 2>/dev/null || true
+            log_err "写入 ipset 中国 IP 段失败: ${range}"
+            return 1
+        fi
+    done
+
+    if ipset list "${INBOUND_CN_IPSET}" >/dev/null 2>&1; then
+        if ! ipset swap "$tmp_set" "${INBOUND_CN_IPSET}"; then
+            ipset destroy "$tmp_set" 2>/dev/null || true
+            log_err "切换 ipset 失败。"
+            return 1
+        fi
+        ipset destroy "$tmp_set" 2>/dev/null || true
+    else
+        if ! ipset rename "$tmp_set" "${INBOUND_CN_IPSET}"; then
+            ipset destroy "$tmp_set" 2>/dev/null || true
+            log_err "创建脚本专用 ipset 失败。"
+            return 1
+        fi
+    fi
+
+    iptables -N "${INBOUND_CN_IPTABLES_CHAIN}" 2>/dev/null || true
+    if ! iptables -F "${INBOUND_CN_IPTABLES_CHAIN}"; then
+        log_err "清空脚本专用 iptables 链失败。"
+        return 1
+    fi
+
+    for port in "${ports[@]}"; do
+        if ! iptables -A "${INBOUND_CN_IPTABLES_CHAIN}" -p tcp --dport "$port" -m set --match-set "${INBOUND_CN_IPSET}" src -j DROP; then
+            log_err "添加 TCP 端口 ${port} 入站屏蔽规则失败。"
+            return 1
+        fi
+        if ! iptables -A "${INBOUND_CN_IPTABLES_CHAIN}" -p udp --dport "$port" -m set --match-set "${INBOUND_CN_IPSET}" src -j DROP; then
+            log_err "添加 UDP 端口 ${port} 入站屏蔽规则失败。"
+            return 1
+        fi
+    done
+
+    if ! iptables -C INPUT -j "${INBOUND_CN_IPTABLES_CHAIN}" 2>/dev/null; then
+        if ! iptables -I INPUT -j "${INBOUND_CN_IPTABLES_CHAIN}"; then
+            log_err "添加 INPUT 跳转规则失败。"
+            return 1
+        fi
+    fi
+}
+
+apply_inbound_cn_block_backend() {
+    local backend="$1"
+
+    case "$backend" in
+        nft)
+            if apply_inbound_cn_block_nft; then
+                remove_inbound_cn_block_iptables
+                return 0
+            fi
+            ;;
+        iptables)
+            if apply_inbound_cn_block_iptables; then
+                remove_inbound_cn_block_nft
+                return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
+enable_inbound_cn_block() {
+    local backend=""
+
+    if [ ! -s "${INBOUND_CN_IP_CACHE}" ]; then
+        download_inbound_cn_ip || return 1
+    fi
+    if ! ensure_firewall_dependencies; then
+        return 1
+    fi
+
+    backend="${SELECTED_FIREWALL_BACKEND}"
+    if ! apply_inbound_cn_block_backend "$backend"; then
+        return 1
+    fi
+
+    mkdir -p "${CONF_DIR}"
+    echo "enabled" > "${INBOUND_CN_BLOCK_ENABLED_FILE}"
+    echo "$backend" > "${INBOUND_CN_BLOCK_BACKEND_FILE}"
+    chmod 644 "${INBOUND_CN_BLOCK_ENABLED_FILE}" "${INBOUND_CN_BLOCK_BACKEND_FILE}"
+    install_inbound_cn_reapply_service
+    log_info "入站 CN IP 屏蔽已启用（后端: ${backend}）。"
+}
+
+disable_inbound_cn_block() {
+    remove_inbound_cn_reapply_service
+    remove_inbound_cn_block_nft
+    remove_inbound_cn_block_iptables
+    rm -f "${INBOUND_CN_BLOCK_ENABLED_FILE}" "${INBOUND_CN_BLOCK_BACKEND_FILE}" "${INBOUND_CN_NFT_RULES_FILE}" "${INBOUND_CN_RANGES_FILE}"
+    log_info "入站 CN IP 屏蔽已禁用。"
+}
+
+reapply_inbound_cn_block() {
+    local backend=""
+
+    inbound_cn_block_enabled || return 0
+
+    if [ -f "${CONF_FILE}" ] && [ "$(jq '.servers | length' "${CONF_FILE}" 2>/dev/null || echo 0)" -eq 0 ]; then
+        remove_inbound_cn_block_nft
+        remove_inbound_cn_block_iptables
+        log_warn "入站 CN IP 屏蔽仍保持启用，但当前没有配置端口，已清理脚本管理的防火墙规则。"
+        return 0
+    fi
+
+    if [ ! -s "${INBOUND_CN_IP_CACHE}" ]; then
+        download_inbound_cn_ip || return 1
+    fi
+
+    if [ -f "${INBOUND_CN_BLOCK_BACKEND_FILE}" ]; then
+        backend=$(trim_ws "$(cat "${INBOUND_CN_BLOCK_BACKEND_FILE}" 2>/dev/null || true)")
+    fi
+
+    if ! inbound_backend_available "$backend"; then
+        if ! ensure_firewall_dependencies; then
+            return 1
+        fi
+        backend="${SELECTED_FIREWALL_BACKEND}"
+    fi
+
+    if ! apply_inbound_cn_block_backend "$backend"; then
+        return 1
+    fi
+
+    echo "$backend" > "${INBOUND_CN_BLOCK_BACKEND_FILE}"
+    install_inbound_cn_reapply_service
+    log_info "入站 CN IP 屏蔽规则已重新应用（后端: ${backend}）。"
+}
+
+configure_inbound_cn_block() {
+    local choice=""
+    local status=""
+    local action_tag=""
+    local backend=""
+
+    while true; do
+        backend=""
+        if [ -f "${INBOUND_CN_BLOCK_BACKEND_FILE}" ]; then
+            backend=$(trim_ws "$(cat "${INBOUND_CN_BLOCK_BACKEND_FILE}" 2>/dev/null || true)")
+        fi
+
+        if inbound_cn_block_enabled; then
+            status="${GREEN}● 已启用${NC}${backend:+ ${DIM}(${backend})${NC}}"
+            action_tag="禁用"
+        else
+            status="${DIM}○ 未启用${NC}"
+            action_tag="启用"
+        fi
+
+        echo -e "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${BOLD}入站 CN IP 屏蔽${NC} ${DIM}(nftables / iptables+ipset)${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  当前状态 :  ${status}"
+        echo -e "  ${DIM}仅手动开启；独立于出站 ACL，不会在安装时自动启用。${NC}"
+        echo -e "${DIM}  ──────────────────────────────────${NC}"
+        echo -e "  ${BOLD}1${NC})  ${action_tag}入站 CN IP 屏蔽"
+        echo -e "  ${BOLD}2${NC})  更新 CN IP 列表并重应用"
+        echo -e "  ${BOLD}0${NC})  返回主菜单"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        read -p "  请选择: " choice
+
+        case "$choice" in
+            1)
+                if inbound_cn_block_enabled; then
+                    disable_inbound_cn_block
+                else
+                    enable_inbound_cn_block || log_warn "启用入站 CN IP 屏蔽失败。"
+                fi
+                ;;
+            2)
+                if inbound_cn_block_enabled; then
+                    if download_inbound_cn_ip && reapply_inbound_cn_block; then
+                        log_info "入站 CN IP 屏蔽列表已更新。"
+                    else
+                        log_warn "更新或重应用入站 CN IP 屏蔽失败。"
+                    fi
+                else
+                    log_warn "入站 CN IP 屏蔽未启用，无需更新。"
+                fi
+                ;;
+            0|"")
+                return
+                ;;
+            *)
+                log_warn "无效选项。"
+                ;;
+        esac
+    done
 }
 
 rebuild_cn_acl() {
@@ -590,7 +1255,7 @@ install_ss() {
     if [ "$has_bin" -eq 1 ] || [ "$has_conf" -eq 1 ] || [ "$has_service" -eq 1 ]; then
         if [ "$has_bin" -eq 1 ] && [ "$has_conf" -eq 1 ] && [ "$has_service" -eq 1 ]; then
             log_warn "检测到已安装 Shadowsocks-rust（版本: $(get_installed_version_tag)）。"
-            log_info "如需升级请使用菜单 8) 更新程序。"
+            log_info "如需升级请使用菜单 12) 更新程序。"
             read -p "是否继续执行覆盖安装？(y/N): " reinstall_confirm
             if ! [[ "$reinstall_confirm" =~ ^[Yy]$ ]]; then
                 log_info "已取消安装。"
@@ -678,7 +1343,7 @@ EOF
     configure_network_options
 
     section "是否屏蔽中国出站？"
-    echo -e "  ${DIM}回车默认不启用，可稍后在菜单 11 中开启${NC}"
+    echo -e "  ${DIM}回车默认不启用，可稍后在菜单 7 中开启${NC}"
     local block_ip_init=""
     local block_domain_init=""
     read -p "  启用屏蔽 CN IP？[y/N]: " block_ip_init
@@ -936,6 +1601,7 @@ add_config() {
        "${CONF_FILE}" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "${CONF_FILE}"
     
     chmod 644 "${CONF_FILE}"
+    reapply_inbound_cn_block || log_warn "入站 CN IP 屏蔽规则重应用失败，请在菜单中手动更新。"
 
     if [ "$context" != "首次安装" ]; then
         if is_service_installed; then
@@ -1032,6 +1698,17 @@ view_config() {
         block_cn_domain_status="${YELLOW}未启用${NC}"
     fi
 
+    local inbound_cn_status=""
+    local inbound_cn_backend=""
+    if [ -f "${INBOUND_CN_BLOCK_BACKEND_FILE}" ]; then
+        inbound_cn_backend=$(trim_ws "$(cat "${INBOUND_CN_BLOCK_BACKEND_FILE}" 2>/dev/null || true)")
+    fi
+    if inbound_cn_block_enabled; then
+        inbound_cn_status="${GREEN}已启用${NC}${inbound_cn_backend:+ ${DIM}(${inbound_cn_backend})${NC}}"
+    else
+        inbound_cn_status="${YELLOW}未启用${NC}"
+    fi
+
     local current_log_level="info (默认)"
     if [ -f "${CONF_DIR}/.env" ]; then
         local env_level
@@ -1048,6 +1725,7 @@ view_config() {
     echo -e "  IPv6优先    ${IPV6_FIRST}"
     echo -e "  屏蔽CN IP   ${block_cn_ip_status}"
     echo -e "  屏蔽CN 域名  ${block_cn_domain_status}"
+    echo -e "  入站CN IP   ${inbound_cn_status}"
     echo -e "  日志等级    ${BOLD}${current_log_level}${NC}"
     echo -e "${DIM}────────────────────────────────────${NC}"
     # 读取所有服务器配置
@@ -1128,6 +1806,7 @@ remove_config() {
 
     jq --argjson idx "$del_index" 'del(.servers[$idx])' "${CONF_FILE}" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "${CONF_FILE}"
     log_info "已删除端口 $DEL_PORT。"
+    reapply_inbound_cn_block || log_warn "入站 CN IP 屏蔽规则重应用失败，请在菜单中手动更新。"
     log_info "重启服务并应用配置..."
     systemctl restart shadowsocks-rust
 }
@@ -1344,6 +2023,7 @@ edit_config() {
 
     chmod 644 "${CONF_FILE}"
     log_info "端口配置已更新。"
+    reapply_inbound_cn_block || log_warn "入站 CN IP 屏蔽规则重应用失败，请在菜单中手动更新。"
 
     if systemctl list-unit-files | grep -q shadowsocks-rust.service; then
         log_info "重启服务并应用配置..."
@@ -1415,6 +2095,9 @@ manage_service() {
 uninstall_ss() {
     read -p "确认卸载（含全部配置）? (y/N): " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "正在清理入站 CN IP 屏蔽规则..."
+        disable_inbound_cn_block || true
+
         log_info "正在停止并禁用服务..."
         systemctl stop shadowsocks-rust 2>/dev/null || true
         systemctl disable shadowsocks-rust 2>/dev/null || true
@@ -1529,13 +2212,14 @@ show_menu() {
     echo -e "${DIM}  ──────────────────────────────────${NC}"
     echo -e "  ${BOLD}6${NC})  全局配置（IPv6优先）"
     echo -e "  ${BOLD}7${NC})  出站 ACL 控制"
+    echo -e "  ${BOLD}8${NC})  入站 CN IP 屏蔽"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
-    echo -e "  ${BOLD}8${NC})  查看实时日志"
-    echo -e "  ${BOLD}9${NC})  切换日志等级（debug/info/warn等）"
+    echo -e "  ${BOLD}9${NC})  查看实时日志"
+    echo -e "  ${BOLD}10${NC}) 切换日志等级（debug/info/warn等）"
     echo -e "${DIM}  ──────────────────────────────────${NC}"
-    echo -e "  ${BOLD}10${NC}) 服务管理"
-    echo -e "  ${BOLD}11${NC}) 更新程序"
-    echo -e "  ${BOLD}12${NC}) 完全卸载"
+    echo -e "  ${BOLD}11${NC}) 服务管理"
+    echo -e "  ${BOLD}12${NC}) 更新程序"
+    echo -e "  ${BOLD}13${NC}) 完全卸载"
     echo -e "  ${BOLD}0${NC})  退出"
     echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     read -p "  请选择: " choice
@@ -1559,11 +2243,12 @@ show_menu() {
             press_any_key
             ;;
         7) configure_block_cn; press_any_key ;;
-        8) view_logs; press_any_key ;;
-        9) configure_log_level; press_any_key ;;
-        10) manage_service; press_any_key ;;
-        11) update_ss; press_any_key ;;
-        12) uninstall_ss; press_any_key ;;
+        8) configure_inbound_cn_block; press_any_key ;;
+        9) view_logs; press_any_key ;;
+        10) configure_log_level; press_any_key ;;
+        11) manage_service; press_any_key ;;
+        12) update_ss; press_any_key ;;
+        13) uninstall_ss; press_any_key ;;
         0) exit 0 ;;
         *) log_warn "无效的选项，请重新输入。"; press_any_key ;;
     esac
