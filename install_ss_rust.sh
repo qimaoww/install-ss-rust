@@ -191,19 +191,35 @@ ensure_dependencies() {
     fi
 }
 
+is_valid_ipv4() {
+    local ip="$1"
+    local o1="" o2="" o3="" o4="" rest=""
+    local octet=""
+
+    [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    IFS='.' read -r o1 o2 o3 o4 rest <<< "$ip"
+    [[ -z "$rest" && -n "$o1" && -n "$o2" && -n "$o3" && -n "$o4" ]] || return 1
+
+    for octet in "$o1" "$o2" "$o3" "$o4"; do
+        [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+
 fetch_public_ip() {
     local ip=""
+    local endpoint=""
 
-    ip=$(curl -4 -fsS --max-time 5 -A "install-ss-rust/1.0" https://api64.ipify.org 2>/dev/null || true)
-    if [[ -z "$ip" ]]; then
-        ip=$(curl -4 -fsS --max-time 5 -A "install-ss-rust/1.0" https://ifconfig.me 2>/dev/null || true)
-    fi
+    for endpoint in https://api64.ipify.org https://ifconfig.me/ip; do
+        ip=$(curl -4 -fsS --max-time 5 -A "install-ss-rust/1.0" "$endpoint" 2>/dev/null || true)
+        ip=$(trim_ws "$ip")
+        if is_valid_ipv4 "$ip"; then
+            echo "$ip"
+            return
+        fi
+    done
 
-    if [[ -z "$ip" ]]; then
-        echo "获取失败"
-    else
-        echo "$ip"
-    fi
+    echo "获取失败"
 }
 
 normalize_listen_addr() {
@@ -1048,8 +1064,7 @@ view_config() {
             SS_DNS=$(jq -r ".servers[$i].dns // \"未设置\"" "${CONF_FILE}")
             SS_OUTBOUND_BIND_ADDR=$(jq -r ".servers[$i].outbound_bind_addr // \"\"" "${CONF_FILE}")
             
-            ENCODED_USERINFO=$(echo -n "${SS_METHOD}:${SS_PASSWORD}" | base64 -w0 | tr -d '=')
-            SS_LINK="ss://${ENCODED_USERINFO}@${IP}:${SS_PORT}#ss-rust-${SS_PORT}"
+            SS_LINK="ss://${SS_METHOD}:${SS_PASSWORD}@${IP}:${SS_PORT}#ss-rust-${SS_PORT}"
             
             echo -e "  ${DIM}── 端口 $((i + 1)) ──${NC}"
             echo -e "  端口号      ${MAGENTA}${BOLD}${SS_PORT}${NC}"
