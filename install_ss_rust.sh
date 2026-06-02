@@ -26,7 +26,7 @@ INBOUND_CN_NFT_SET="cn_ipv4"
 INBOUND_CN_NFT_CHAIN="inbound_cn_block"
 INBOUND_CN_IPSET="ss_rust_cn_ipv4"
 INBOUND_CN_IPTABLES_CHAIN="SS_RUST_CN_BLOCK"
-CN_IP_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geoip/cn.list"
+CN_IP_URL="https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt"
 CN_DOMAIN_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geosite/geolocation-cn.list"
 PORT_MIN=10000
 PORT_MAX=65535
@@ -303,21 +303,36 @@ download_cn_ip_to() {
     local target_file="$1"
     local label="${2:-中国 IP 列表}"
     local tmp_file=""
+    local tmp_acl=""
     tmp_file=$(mktemp /tmp/cn_ip.XXXXXX)
+    tmp_acl=$(mktemp /tmp/cn_ip_acl.XXXXXX)
 
     log_info "正在下载${label}..."
     if ! curl -fsSL --retry 3 --connect-timeout 15 -o "$tmp_file" "${CN_IP_URL}"; then
-        rm -f "$tmp_file"
+        rm -f "$tmp_file" "$tmp_acl"
         log_err "下载${label}失败，请检查网络连接。"
         return 1
     fi
     if [ ! -s "$tmp_file" ]; then
-        rm -f "$tmp_file"
+        rm -f "$tmp_file" "$tmp_acl"
         log_err "下载的${label}为空。"
         return 1
     fi
+    # 过滤注释/空行，仅保留 IPv4/CIDR。
+    awk '{
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+        if (/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) {
+            print
+        }
+    }' "$tmp_file" > "$tmp_acl"
+    rm -f "$tmp_file"
+    if [ ! -s "$tmp_acl" ]; then
+        rm -f "$tmp_acl"
+        log_err "下载的${label}不包含有效 IPv4/CIDR 条目。"
+        return 1
+    fi
     mkdir -p "${CONF_DIR}"
-    mv "$tmp_file" "$target_file"
+    mv "$tmp_acl" "$target_file"
     chmod 644 "$target_file"
     log_info "${label}已保存，共 $(wc -l < "$target_file") 条。"
     return 0
@@ -1014,7 +1029,8 @@ rebuild_cn_acl() {
     cat > "${ACL_FILE}" <<'ACLHEADER'
 # Shadowsocks-rust ACL: 禁止出站到中国 IP/域名
 # 由 install_ss_rust.sh 自动生成
-# 数据来源: https://github.com/MetaCubeX/meta-rules-dat
+# IP 数据来源: https://github.com/misakaio/chnroutes2
+# 域名数据来源: https://github.com/MetaCubeX/meta-rules-dat
 
 [outbound_block_list]
 ACLHEADER
